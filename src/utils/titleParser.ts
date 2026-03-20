@@ -1,0 +1,106 @@
+/**
+ * titleParser.ts
+ *
+ * Extracts a clean anime title and episode number from messy release filenames.
+ * Examples:
+ *   "[SubsPlease] Frieren - 01 (1080p) [Hash].mkv"  → { title: "Frieren", episode: 1 }
+ *   "Naruto Shippuden S01E04.mkv"                   → { title: "Naruto Shippuden", episode: 4 }
+ *   "One Piece - 1000.mp4"                          → { title: "One Piece", episode: 1000 }
+ */
+
+export interface ParsedAnime {
+  title: string;
+  episode: number;
+  quality?: string;
+  group?: string;
+}
+
+// Remove extension
+function stripExtension(name: string): string {
+  return name.replace(/\.[a-z0-9]{2,4}$/i, '');
+}
+
+// Strip common release group tags like [SubsPlease], [HorribleSubs]
+function stripGroupTag(name: string): { cleaned: string; group?: string } {
+  const match = name.match(/^\[([^\]]+)\]\s*(.*)/);
+  if (match) return { cleaned: match[2], group: match[1] };
+  return { cleaned: name };
+}
+
+// Strip trailing noise: quality, hash, etc. e.g. "(1080p) [ABCD1234]"
+function stripTrailingNoise(name: string): string {
+  return name
+    .replace(/[._]+/g, ' ')              // dots/underscores used as separators
+    .replace(/\s*\([^)]*\)\s*/g, ' ')    // (1080p), (BD), etc.
+    .replace(/\s*\[[^\]]*\]\s*/g, ' ')   // [Hash], [AAC], etc.
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Try to extract episode number in patterns like: "- 01", "E01", "Episode 01", " 01 "
+function extractEpisode(name: string): { title: string; episode: number } | null {
+  // Pattern: "Title - 01" or "Title – 01"
+  let m = name.match(/^(.+?)\s*[-–]\s*(\d{1,4})\s*$/);
+  if (m) return { title: m[1].trim(), episode: parseInt(m[2], 10) };
+
+  // Pattern: SxxExx
+  m = name.match(/^(.+?)\s*[Ss]\d{1,2}[Ee](\d{1,4})\b/i);
+  if (m) return { title: m[1].trim(), episode: parseInt(m[2], 10) };
+
+  // Pattern: "Episode 01" / "Ep01"
+  m = name.match(/^(.+?)\s*[Ee]p(?:isode)?\s*(\d{1,4})\s*$/);
+  if (m) return { title: m[1].trim(), episode: parseInt(m[2], 10) };
+
+  // Pattern: trailing number "Title 01"
+  m = name.match(/^(.+?)\s+(\d{1,4})\s*$/);
+  if (m) return { title: m[1].trim(), episode: parseInt(m[2], 10) };
+
+  return null;
+}
+
+export function parseAnimeFilename(filename: string): ParsedAnime | null {
+  try {
+    let name = stripExtension(filename);
+    const { cleaned, group } = stripGroupTag(name);
+    name = stripTrailingNoise(cleaned);
+
+    // Detect quality string for reference
+    const qualityMatch = filename.match(/\b(480p|720p|1080p|2160p|4K|BD|BluRay|WEB-DL)\b/i);
+    const quality = qualityMatch?.[1];
+
+    const parsed = extractEpisode(name);
+    if (!parsed) return null;
+
+    return {
+      title: parsed.title,
+      episode: parsed.episode,
+      quality,
+      group,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Derive a show title from a folder path like:
+ *   "Frieren/Season 1/S01E01.mkv"  → "Frieren"
+ *   "Naruto Shippuden/E01.mkv"     → "Naruto Shippuden"
+ *
+ * Falls back to filename parsing.
+ */
+export function parseFolderPath(relativePath: string): ParsedAnime | null {
+  const parts = relativePath.replace(/\\/g, '/').split('/');
+  const filename = parts[parts.length - 1];
+  const folderTitle = parts.length > 1 ? parts[0] : null;
+
+  const parsed = parseAnimeFilename(filename);
+  if (!parsed) return null;
+
+  // Prefer folder name as title if it looks meaningful
+  if (folderTitle && folderTitle.length > 1 && !/^season/i.test(folderTitle)) {
+    parsed.title = folderTitle.trim();
+  }
+
+  return parsed;
+}
