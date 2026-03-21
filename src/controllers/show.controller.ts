@@ -50,15 +50,15 @@ export async function getShowById(req: Request, res: Response) {
     return;
   }
 
-  // Fetch ALL episodes for this show — no limit, ordered by episode number.
-  // episode_number is stored as numeric/float in Postgres (e.g. 21.0) so we
-  // cast it to int for reliable dedup and sorting.
+  // Fetch episodes for this show ordered by episode number.
+  // Explicit limit of 10000 — Supabase's default PostgREST page size is
+  // 1000 rows, which would silently truncate shows with many episodes.
   const { data: episodesRaw, error: epError } = await supabase
     .from('episodes')
     .select('id, episode_number, title, duration, created_at')
     .eq('show_id', id)
     .order('episode_number', { ascending: true })
-    .limit(10000); // explicit high limit — Supabase default is 1000
+    .limit(10000);
 
   if (epError) {
     console.error('[Shows] getShowById episodes error:', epError.message);
@@ -66,17 +66,29 @@ export async function getShowById(req: Request, res: Response) {
     return;
   }
 
-  // Deduplicate by episode_number — cast to integer first so that 1.0 and 1
-  // are treated as the same episode (Postgres numeric columns may return floats).
-  const seen = new Set<number>();
+  // Normalise episode_number: Postgres numeric columns come back as floats
+  // (e.g. 21.0). Strip the trailing .0 for whole numbers but preserve
+  // genuine fractional episodes (e.g. 5.5 specials) without rounding them
+  // into an adjacent episode. NULL episode_number is kept as-is (null)
+  // rather than collapsed to 0, so those rows are not silently merged.
+  const normalise = (n: number | null): number | null => {
+    if (n === null || n === undefined) return null;
+    // If it is already a whole number stored as float (21.0 → 21), truncate.
+    // If it is genuinely fractional (5.5), preserve it.
+    return Number.isInteger(n) || Math.trunc(n) === n ? Math.trunc(n) : n;
+  };
+
+  const seen = new Set<number | null>();
   const episodes = (episodesRaw ?? [])
-    .map(ep => ({ ...ep, episode_number: Math.round(ep.episode_number ?? 0) }))
+    .map(ep => ({ ...ep, episode_number: normalise(ep.episode_number) }))
     .filter(ep => {
+      // Skip rows with no episode number rather than merging them all at 0
+      if (ep.episode_number === null) return false;
       if (seen.has(ep.episode_number)) return false;
       seen.add(ep.episode_number);
       return true;
     })
-    .sort((a, b) => a.episode_number - b.episode_number);
+    .sort((a, b) => (a.episode_number ?? 0) - (b.episode_number ?? 0));
 
   res.json({ ...show, episodes });
 }

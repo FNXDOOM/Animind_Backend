@@ -124,15 +124,18 @@ async function getOrCreateShow(title: string): Promise<string> {
     trailer_thumbnail: meta?.trailer?.thumbnail ?? null,
   };
 
-  // Insert — use upsert so concurrent scans don't race to insert twice
+  // Try a plain INSERT first. If it fails due to a unique violation (race condition
+  // where another scan inserted the same show between our lookup and now), we fall
+  // back to fetching the existing row. This avoids relying on onConflict targeting
+  // an expression index (lower(trim(title))) which PostgREST cannot resolve.
   const { data: inserted, error } = await supabase
     .from('shows')
-    .upsert(showPayload, { onConflict: 'title', ignoreDuplicates: false })
+    .insert(showPayload)
     .select('id')
     .single();
 
   if (error) {
-    // Lost a race with another concurrent scan — fetch the winner
+    // Likely a unique constraint violation — fetch the row that won the race
     const { data: raceWinner } = await supabase
       .from('shows')
       .select('id')
@@ -165,7 +168,7 @@ async function upsertEpisode(
         file_path: filePath,
         bucket_name: bucketName,
       },
-      { onConflict: 'show_id,episode_number' } // no space — matches the constraint name
+      { onConflict: 'show_id,episode_number' } // comma-separated column list matching UNIQUE(show_id, episode_number)
     );
 
   if (error) {

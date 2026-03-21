@@ -107,11 +107,25 @@ ALTER TABLE episodes
 
 
 -- ────────────────────────────────────────────────────────────
--- STEP 6: Add case-insensitive UNIQUE index on shows(title)
+-- STEP 6: Add UNIQUE constraint + case-insensitive index on shows(title)
+--
+--   IMPORTANT: PostgREST onConflict: 'title' requires a real UNIQUE
+--   CONSTRAINT on the column — NOT just an expression index.
+--   Without this constraint the upsert silently falls back to INSERT
+--   and duplicates can still be created (Copilot was right about this).
 -- ────────────────────────────────────────────────────────────
+
+-- Real UNIQUE constraint that PostgREST can target with onConflict: 'title'
+ALTER TABLE shows
+  DROP CONSTRAINT IF EXISTS shows_title_key;
+
+ALTER TABLE shows
+  ADD CONSTRAINT shows_title_key UNIQUE (title);
+
+-- Expression index for fast case-insensitive .ilike() lookups in the scanner
 DROP INDEX IF EXISTS shows_title_unique;
 
-CREATE UNIQUE INDEX shows_title_unique
+CREATE INDEX shows_title_unique
   ON shows (lower(trim(title)));
 
 
