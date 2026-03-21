@@ -53,16 +53,34 @@ WHERE
   );
 
 -- If the above UPDATE didn't catch all orphans (file path matching
--- is imperfect), do a second pass: link remaining orphans to the
--- show with the most similar title using a looser match.
--- This catches episodes where the file path uses dots instead of spaces.
-UPDATE episodes
-SET show_id = (
-  SELECT id FROM shows
-  ORDER BY shows.title ASC
-  LIMIT 1
-)
-WHERE show_id NOT IN (SELECT id FROM shows);
+-- is imperfect), do a second pass: link remaining orphans to a
+-- show using a *looser* but still deterministic match.
+-- This catches episodes where the file path uses dots/underscores
+-- instead of spaces, but only when there is a unique matching show.
+UPDATE episodes AS e
+SET show_id = s.id
+FROM shows AS s
+WHERE
+  -- Episode is still orphaned (its show_id was deleted)
+  e.show_id NOT IN (SELECT id FROM shows)
+  -- Looser match: allow dots/underscores in file_path where the
+  -- title has spaces.
+  AND (
+    e.file_path ILIKE '%' || replace(s.title, ' ', '.') || '%'
+    OR e.file_path ILIKE '%' || replace(s.title, ' ', '_') || '%'
+  )
+  -- Ensure this episode matches *only one* show under the looser
+  -- criteria; if multiple shows match, leave it orphaned for
+  -- manual review rather than guessing.
+  AND NOT EXISTS (
+    SELECT 1
+    FROM shows AS s2
+    WHERE s2.id <> s.id
+      AND (
+        e.file_path ILIKE '%' || replace(s2.title, ' ', '.') || '%'
+        OR e.file_path ILIKE '%' || replace(s2.title, ' ', '_') || '%'
+      )
+  );
 
 
 -- ────────────────────────────────────────────────────────────
