@@ -54,20 +54,16 @@ volumes:
   - /mnt/anime:/mnt/anime:ro
 ```
 
-## 4. Important note for ffmpeg/ffprobe
+## 4. FFmpeg / FFprobe paths
 
-Your `.env.example` currently includes Windows paths (`C:/...`) for `FFMPEG_PATH` and `FFPROBE_PATH`.
-On Linux containers, either:
-
-- remove those lines from `.env`, or
-- set Linux-safe values:
+Your `.env.example` is configured with Docker-safe defaults:
 
 ```env
 FFMPEG_PATH=ffmpeg
 FFPROBE_PATH=ffprobe
 ```
 
-The Docker image installs `ffmpeg`, which also provides `ffprobe`.
+No changes needed – the Docker image installs `ffmpeg` (which includes `ffprobe`) via Alpine's package manager, so these command names will resolve correctly in the container.
 
 ## 5. Build and run on VPS
 
