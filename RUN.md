@@ -211,6 +211,16 @@ curl -X POST http://localhost:3001/api/rescan
 # → [] (empty array until videos are scanned)
 ```
 
+### Run automated tests
+
+```bash
+npm run test
+```
+
+Current test coverage includes:
+- Route wiring and status responses (health, shows, rescan, auth/admin protected routes)
+- Auth middleware behavior (missing/invalid token, valid token, admin guard)
+
 ---
 
 ## 8. Step 6 — Connect the Frontend

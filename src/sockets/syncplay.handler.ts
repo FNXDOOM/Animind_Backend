@@ -28,6 +28,7 @@ interface Room {
 
 // ── In-memory room store ─────────────────────────────────────────────────────
 const rooms = new Map<string, Room>();
+const userDisplayNameCache = new Map<string, string>();
 
 function generateRoomCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -40,6 +41,21 @@ async function verifySocketToken(token: string): Promise<string | null> {
   const { data, error } = await supabase.auth.getUser(token);
   if (error || !data.user) return null;
   return data.user.id;
+}
+
+async function getUserDisplayName(userId: string): Promise<string> {
+  const cached = userDisplayNameCache.get(userId);
+  if (cached) return cached;
+
+  const { data } = await supabase
+    .from('profiles')
+    .select('username')
+    .eq('id', userId)
+    .maybeSingle();
+
+  const displayName = data?.username?.trim() || `User ${userId.slice(0, 8)}`;
+  userDisplayNameCache.set(userId, displayName);
+  return displayName;
 }
 
 // ── Handler ──────────────────────────────────────────────────────────────────
@@ -145,8 +161,10 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
         if (error) console.warn('[SyncPlay] DB participant warn:', error.message);
       });
 
+      const displayName = await getUserDisplayName(userId);
+
       // Notify others
-      socket.to(roomCode).emit('peerJoined', { userId, participantCount: room.participants.size });
+      socket.to(roomCode).emit('peerJoined', { userId, displayName, participantCount: room.participants.size });
 
       if (typeof callback === 'function') {
         callback({
@@ -165,6 +183,10 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       const code = (socket as any).roomCode;
       const room = rooms.get(code);
       if (!room) return;
+      if (room.hostSocketId !== socket.id) {
+        socket.emit('syncDenied', { reason: 'Only the host can control playback.' });
+        return;
+      }
 
       room.isPlaying = true;
       room.currentTime = currentTime;
@@ -177,6 +199,10 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       const code = (socket as any).roomCode;
       const room = rooms.get(code);
       if (!room) return;
+      if (room.hostSocketId !== socket.id) {
+        socket.emit('syncDenied', { reason: 'Only the host can control playback.' });
+        return;
+      }
 
       room.isPlaying = false;
       room.currentTime = currentTime;
@@ -188,31 +214,37 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       const code = (socket as any).roomCode;
       const room = rooms.get(code);
       if (!room) return;
+      if (room.hostSocketId !== socket.id) {
+        socket.emit('syncDenied', { reason: 'Only the host can control playback.' });
+        return;
+      }
 
       room.currentTime = time;
       socket.to(code).emit('seek', { time, fromUserId: userId });
     });
 
     // ── buffering ─────────────────────────────────────────────────────────────
-    socket.on('buffering', () => {
+    socket.on('buffering', async () => {
       const code = (socket as any).roomCode;
       const room = rooms.get(code);
       if (!room) return;
 
       room.buffering.add(socket.id);
+      const displayName = await getUserDisplayName(userId);
       // Ask everyone to pause while someone is buffering
       io.to(code).emit('pause', { currentTime: room.currentTime, fromUserId: 'system', reason: 'buffering' });
-      io.to(code).emit('peerBuffering', { userId });
+      io.to(code).emit('peerBuffering', { userId, displayName });
     });
 
     // ── ready (buffering done) ────────────────────────────────────────────────
-    socket.on('ready', () => {
+    socket.on('ready', async () => {
       const code = (socket as any).roomCode;
       const room = rooms.get(code);
       if (!room) return;
 
       room.buffering.delete(socket.id);
-      io.to(code).emit('peerReady', { userId });
+      const displayName = await getUserDisplayName(userId);
+      io.to(code).emit('peerReady', { userId, displayName });
 
       // If no one is buffering anymore, resume
       if (room.buffering.size === 0 && room.isPlaying) {
@@ -233,7 +265,7 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
     });
 
     // ── disconnect / leave ────────────────────────────────────────────────────
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       const code = (socket as any).roomCode;
       if (!code) return;
 
@@ -256,11 +288,13 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
             const [newHostSocketId, newHostUserId] = nextParticipant;
             room.hostSocketId = newHostSocketId;
             room.hostUserId = newHostUserId;
-            io.to(code).emit('hostChanged', { newHostUserId });
+            const newHostDisplayName = await getUserDisplayName(newHostUserId);
+            io.to(code).emit('hostChanged', { newHostUserId, newHostDisplayName });
             console.log(`[SyncPlay] Host left room ${code}, new host: ${newHostUserId}`);
           }
         }
-        socket.to(code).emit('peerLeft', { userId, participantCount: room.participants.size });
+        const displayName = await getUserDisplayName(userId);
+        socket.to(code).emit('peerLeft', { userId, displayName, participantCount: room.participants.size });
       }
 
       console.log(`[SyncPlay] Disconnected: ${socket.id} (user: ${userId})`);

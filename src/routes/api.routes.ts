@@ -3,6 +3,7 @@ import { getShows, getShowById } from '../controllers/show.controller.js';
 import { streamEpisode, getEpisodeSubtitles } from '../controllers/episode.controller.js';
 import { rescanLibrary, storageWebhook } from '../controllers/scanner.controller.js';
 import { listUsers, setAdminStatus, deleteShow, triggerAdminScan } from '../controllers/admin.controller.js';
+import { deleteMyAccount } from '../controllers/account.controller.js';
 import { requireAuth, requireAdmin, AuthRequest } from '../middleware/auth.middleware.js';
 
 const router = Router();
@@ -22,6 +23,7 @@ router.post('/webhooks/storage', storageWebhook);
 // Stream endpoint — frontend VideoModal fetches this for the actual video URL
 router.get('/episodes/:id/stream', requireAuth as any, streamEpisode);
 router.get('/episodes/:id/subtitles', requireAuth as any, getEpisodeSubtitles);
+router.delete('/account', requireAuth as any, deleteMyAccount as any);
 
 // ── Admin-only ───────────────────────────────────────────────────────────────
 router.get('/admin/users', requireAuth as any, requireAdmin as any, listUsers);
