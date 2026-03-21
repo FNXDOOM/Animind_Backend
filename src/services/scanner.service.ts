@@ -79,20 +79,37 @@ async function listLocalFiles(dir: string, base = dir): Promise<string[]> {
 // ── DB Operations ────────────────────────────────────────────────────────────
 
 async function getOrCreateShow(title: string): Promise<string> {
-  // 1. Check if show already exists
+  const trimmed = title.trim();
+
+  // 1. Quick lookup by the raw parsed title (covers most cases)
   const { data: existing } = await supabase
     .from('shows')
     .select('id')
-    .ilike('title', title)
+    .ilike('title', trimmed)
     .maybeSingle();
 
   if (existing?.id) return existing.id;
 
-  // 2. Try to fetch AniList metadata
-  const meta = await fetchAniListMeta(title);
+  // 2. Fetch AniList metadata — this gives us the canonical title
+  const meta = await fetchAniListMeta(trimmed);
+  const canonicalTitle = meta?.title?.english ?? meta?.title?.romaji ?? trimmed;
+
+  // 3. If the canonical title differs from the parsed title, check again.
+  //    e.g. file "Frieren Beyond Journey's End" → AniList → "Frieren: Beyond Journey's End"
+  //    The second show row already exists under the canonical title, so we find it here
+  //    instead of inserting a duplicate.
+  if (canonicalTitle.toLowerCase() !== trimmed.toLowerCase()) {
+    const { data: byCanonical } = await supabase
+      .from('shows')
+      .select('id')
+      .ilike('title', canonicalTitle)
+      .maybeSingle();
+
+    if (byCanonical?.id) return byCanonical.id;
+  }
 
   const showPayload = {
-    title: meta?.title?.english ?? meta?.title?.romaji ?? title,
+    title: canonicalTitle,
     synopsis: meta?.description?.replace(/<[^>]+>/g, '') ?? null,
     cover_image_url: meta?.coverImage?.large ?? null,
     anilist_id: meta?.id ?? null,
@@ -107,34 +124,55 @@ async function getOrCreateShow(title: string): Promise<string> {
     trailer_thumbnail: meta?.trailer?.thumbnail ?? null,
   };
 
+  // Insert — use upsert so concurrent scans don't race to insert twice
   const { data: inserted, error } = await supabase
     .from('shows')
-    .insert(showPayload)
+    .upsert(showPayload, { onConflict: 'title', ignoreDuplicates: false })
     .select('id')
     .single();
 
-  if (error) throw new Error(`Failed to insert show "${title}": ${error.message}`);
+  if (error) {
+    // Lost a race with another concurrent scan — fetch the winner
+    const { data: raceWinner } = await supabase
+      .from('shows')
+      .select('id')
+      .ilike('title', canonicalTitle)
+      .maybeSingle();
+    if (raceWinner?.id) return raceWinner.id;
+    throw new Error(`Failed to insert show "${title}": ${error.message}`);
+  }
+
   return inserted.id;
 }
 
+/**
+ * Upsert an episode row using the UNIQUE(show_id, episode_number) DB constraint.
+ * Now that the constraint exists in Postgres, PostgREST's onConflict works
+ * correctly — no space in the key name, no manual check-then-insert needed.
+ */
 async function upsertEpisode(
   showId: string,
   episodeNumber: number,
   filePath: string,
   bucketName: string
-) {
-  const { error } = await supabase.from('episodes').upsert(
-    {
-      show_id: showId,
-      episode_number: episodeNumber,
-      file_path: filePath,
-      bucket_name: bucketName,
-    },
-    { onConflict: 'show_id, episode_number' }
-  );
+): Promise<void> {
+  const { error } = await supabase
+    .from('episodes')
+    .upsert(
+      {
+        show_id: showId,
+        episode_number: episodeNumber,
+        file_path: filePath,
+        bucket_name: bucketName,
+      },
+      { onConflict: 'show_id,episode_number' } // no space — matches the constraint name
+    );
 
   if (error) {
-    console.error(`[Scanner] Failed to upsert episode ${episodeNumber} for show ${showId}:`, error.message);
+    console.error(
+      `[Scanner] Failed to upsert episode ${episodeNumber} for show ${showId}:`,
+      error.message
+    );
   }
 }
 
