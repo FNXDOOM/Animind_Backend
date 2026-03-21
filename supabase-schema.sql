@@ -116,17 +116,17 @@ CREATE UNIQUE INDEX shows_title_unique
 
 
 -- ────────────────────────────────────────────────────────────
--- STEP 7: Performance index for scanner title lookups
+-- STEP 7: (removed) Redundant performance index for scanner title lookups
+--   Note: shows_title_unique already provides a btree index on lower(trim(title)),
+--   so an additional non-unique index on the same expression is unnecessary.
 -- ────────────────────────────────────────────────────────────
-DROP INDEX IF EXISTS shows_title_lower_idx;
-
-CREATE INDEX shows_title_lower_idx
-  ON shows (lower(trim(title)));
 
 
 -- ────────────────────────────────────────────────────────────
 -- VERIFICATION — run these after to confirm it worked
 -- ────────────────────────────────────────────────────────────
+
+-- 1. Check all shows and their episode counts (Frieren should show 28)
 
 -- 1. Check all shows and their episode counts (Frieren should show 28)
 -- SELECT s.title, COUNT(e.id) as episode_count
