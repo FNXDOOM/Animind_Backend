@@ -35,8 +35,15 @@ UPDATE episodes
 SET show_id = shows.id
 FROM shows
 WHERE
-  -- Episode is orphaned (its show_id was deleted)
-  episodes.show_id NOT IN (SELECT id FROM shows)
+  -- Episode is orphaned (its show_id was deleted or is NULL)
+  (
+    episodes.show_id IS NULL
+    OR NOT EXISTS (
+      SELECT 1
+      FROM shows s
+      WHERE s.id = episodes.show_id
+    )
+  )
   -- Find the show whose title matches something in the file path
   AND (
     episodes.file_path ILIKE '%' || replace(shows.title, ':', '') || '%'
