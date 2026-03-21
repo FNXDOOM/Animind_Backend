@@ -24,40 +24,39 @@ WHERE
 --   the episode's file_path against the surviving show's title,
 --   then re-link them.
 --
---   Strategy: for each orphaned episode, find the show whose
---   title appears in the episode's file_path (case-insensitive).
--- ────────────────────────────────────────────────────────────
+--  AniMind Supabase Schema Entry Point (DEPRECATED)
+-- ============================================================
+--
+-- IMPORTANT:
+--   This file was previously (incorrectly) used as a data-cleanup
+--   script containing destructive DELETE/UPDATE statements on
+--   application tables (e.g. shows, episodes), even though
+--   RUN.md documents `supabase-schema.sql` as the one-time
+--   *schema migration* that creates all tables.
+--
+--   To prevent accidental data loss in new or existing Supabase
+--   projects, all destructive logic has been removed from this
+--   file. If RUN.md or any other docs still instruct you to run
+--   `supabase-schema.sql` to initialize the database schema,
+--   update them: use your proper Supabase migrations instead.
+--
+--   If you still need the old cleanup behavior, move it into a
+--   separate, clearly named maintenance script (for example,
+--   `supabase-cleanup-orphans.sql`) and run it only in a
+--   controlled environment after reviewing its contents.
+--
+--   As a safety net, executing this file now immediately raises
+--   an exception and performs NO data modifications.
+-- ============================================================
 
--- First, find orphaned episodes (show_id no longer exists)
--- and re-link them to the correct surviving show by matching
--- the show title against the file path.
-UPDATE episodes
-SET show_id = shows.id
-FROM shows
-WHERE
-  -- Episode is orphaned (its show_id was deleted)
-  episodes.show_id NOT IN (SELECT id FROM shows)
-  -- Find the show whose title matches something in the file path
-  AND (
-    episodes.file_path ILIKE '%' || replace(shows.title, ':', '') || '%'
-    OR episodes.file_path ILIKE '%' || replace(shows.title, ': ', ' ') || '%'
-    OR episodes.file_path ILIKE '%' || replace(shows.title, ': ', '.') || '%'
-    OR episodes.file_path ILIKE '%Frieren%'  -- fallback for Frieren specifically
-  );
-
--- If the above UPDATE didn't catch all orphans (file path matching
--- is imperfect), do a second pass: link remaining orphans to the
--- show with the most similar title using a looser match.
--- This catches episodes where the file path uses dots instead of spaces.
-UPDATE episodes
-SET show_id = (
-  SELECT id FROM shows
-  ORDER BY shows.title ASC
-  LIMIT 1
-)
-WHERE show_id NOT IN (SELECT id FROM shows);
-
-
+DO $$
+BEGIN
+  RAISE EXCEPTION
+    'supabase-schema.sql is deprecated as a cleanup script and no longer contains schema definitions. ' ||
+    'Do NOT use this file to initialize or modify production data. ' ||
+    'Move any data-cleanup SQL into a separate, explicitly named migration/maintenance script.';
+END;
+$$;
 -- ────────────────────────────────────────────────────────────
 -- STEP 3: Delete duplicate episode rows
 --   Now that all episodes are linked to their correct show,
@@ -130,17 +129,17 @@ CREATE INDEX shows_title_unique
 
 
 -- ────────────────────────────────────────────────────────────
--- STEP 7: Performance index for scanner title lookups
+-- STEP 7: (removed) Redundant performance index for scanner title lookups
+--   Note: shows_title_unique already provides a btree index on lower(trim(title)),
+--   so an additional non-unique index on the same expression is unnecessary.
 -- ────────────────────────────────────────────────────────────
-DROP INDEX IF EXISTS shows_title_lower_idx;
-
-CREATE INDEX shows_title_lower_idx
-  ON shows (lower(trim(title)));
 
 
 -- ────────────────────────────────────────────────────────────
 -- VERIFICATION — run these after to confirm it worked
 -- ────────────────────────────────────────────────────────────
+
+-- 1. Check all shows and their episode counts (Frieren should show 28)
 
 -- 1. Check all shows and their episode counts (Frieren should show 28)
 -- SELECT s.title, COUNT(e.id) as episode_count
