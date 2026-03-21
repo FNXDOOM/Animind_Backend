@@ -24,65 +24,39 @@ WHERE
 --   the episode's file_path against the surviving show's title,
 --   then re-link them.
 --
---   Strategy: for each orphaned episode, find the show whose
---   title appears in the episode's file_path (case-insensitive).
--- ────────────────────────────────────────────────────────────
+--  AniMind Supabase Schema Entry Point (DEPRECATED)
+-- ============================================================
+--
+-- IMPORTANT:
+--   This file was previously (incorrectly) used as a data-cleanup
+--   script containing destructive DELETE/UPDATE statements on
+--   application tables (e.g. shows, episodes), even though
+--   RUN.md documents `supabase-schema.sql` as the one-time
+--   *schema migration* that creates all tables.
+--
+--   To prevent accidental data loss in new or existing Supabase
+--   projects, all destructive logic has been removed from this
+--   file. If RUN.md or any other docs still instruct you to run
+--   `supabase-schema.sql` to initialize the database schema,
+--   update them: use your proper Supabase migrations instead.
+--
+--   If you still need the old cleanup behavior, move it into a
+--   separate, clearly named maintenance script (for example,
+--   `supabase-cleanup-orphans.sql`) and run it only in a
+--   controlled environment after reviewing its contents.
+--
+--   As a safety net, executing this file now immediately raises
+--   an exception and performs NO data modifications.
+-- ============================================================
 
--- First, find orphaned episodes (show_id no longer exists)
--- and re-link them to the correct surviving show by matching
--- the show title against the file path.
-UPDATE episodes
-SET show_id = shows.id
-FROM shows
-WHERE
-  -- Episode is orphaned (its show_id was deleted or is NULL)
-  (
-    episodes.show_id IS NULL
-    OR NOT EXISTS (
-      SELECT 1
-      FROM shows s
-      WHERE s.id = episodes.show_id
-    )
-  )
-  -- Find the show whose title matches something in the file path
-  AND (
-    episodes.file_path ILIKE '%' || replace(shows.title, ':', '') || '%'
-    OR episodes.file_path ILIKE '%' || replace(shows.title, ': ', ' ') || '%'
-    OR episodes.file_path ILIKE '%' || replace(shows.title, ': ', '.') || '%'
-    OR episodes.file_path ILIKE '%Frieren%'  -- fallback for Frieren specifically
-  );
-
--- If the above UPDATE didn't catch all orphans (file path matching
--- is imperfect), do a second pass: link remaining orphans to a
--- show using a *looser* but still deterministic match.
--- This catches episodes where the file path uses dots/underscores
--- instead of spaces, but only when there is a unique matching show.
-UPDATE episodes AS e
-SET show_id = s.id
-FROM shows AS s
-WHERE
-  -- Episode is still orphaned (its show_id was deleted)
-  e.show_id NOT IN (SELECT id FROM shows)
-  -- Looser match: allow dots/underscores in file_path where the
-  -- title has spaces.
-  AND (
-    e.file_path ILIKE '%' || replace(s.title, ' ', '.') || '%'
-    OR e.file_path ILIKE '%' || replace(s.title, ' ', '_') || '%'
-  )
-  -- Ensure this episode matches *only one* show under the looser
-  -- criteria; if multiple shows match, leave it orphaned for
-  -- manual review rather than guessing.
-  AND NOT EXISTS (
-    SELECT 1
-    FROM shows AS s2
-    WHERE s2.id <> s.id
-      AND (
-        e.file_path ILIKE '%' || replace(s2.title, ' ', '.') || '%'
-        OR e.file_path ILIKE '%' || replace(s2.title, ' ', '_') || '%'
-      )
-  );
-
-
+DO $$
+BEGIN
+  RAISE EXCEPTION
+    'supabase-schema.sql is deprecated as a cleanup script and no longer contains schema definitions. ' ||
+    'Do NOT use this file to initialize or modify production data. ' ||
+    'Move any data-cleanup SQL into a separate, explicitly named migration/maintenance script.';
+END;
+$$;
 -- ────────────────────────────────────────────────────────────
 -- STEP 3: Delete duplicate episode rows
 --   Now that all episodes are linked to their correct show,
