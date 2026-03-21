@@ -17,6 +17,7 @@ This guide walks you through setting up, configuring, and running the Animind ba
 10. [API Reference](#10-api-reference)
 11. [SyncPlay Socket Events](#11-syncplay-socket-events)
 12. [Troubleshooting](#12-troubleshooting)
+13. [Docker On VPS](#13-docker-on-vps)
 
 ---
 
@@ -434,3 +435,34 @@ const socket = io(VITE_CLOUD_SERVER_URL, {
 
 **TypeScript build errors**
 → Run `npx tsc --noEmit` to see all errors. Most are caused by mismatched `@types/*` versions — delete `node_modules/` and run `npm install` again.
+
+---
+
+## 13. Docker On VPS
+
+You can run this backend in Docker on a VPS with the files in this repository:
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `.dockerignore`
+- `DOCKER_VPS_README.md`
+
+Quick start:
+
+```bash
+cp .env.example .env
+# Edit .env values for your environment first
+
+docker compose build
+docker compose up -d
+docker compose logs -f
+```
+
+Full step-by-step guide:
+
+- See `DOCKER_VPS_README.md`
+
+After backend is live behind HTTPS (recommended):
+
+- Set frontend env on Vercel: `VITE_CLOUD_SERVER_URL=https://api.yourdomain.com`
+- Redeploy frontend
