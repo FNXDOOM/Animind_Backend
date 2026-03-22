@@ -1,7 +1,8 @@
 import { Request, Response } from 'express';
 import { createReadStream } from 'fs';
-import { stat, readFile, readdir } from 'fs/promises';
+import { stat, readFile, readdir, mkdir } from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import { supabase } from '../config/db.js';
@@ -15,8 +16,81 @@ interface SubtitleTrackPayload {
   content: string;
 }
 
+interface AudioTrackPayload {
+  id: string;
+  label: string;
+  language: string;
+  streamIndex: number;
+}
+
 const SUBTITLE_EXTENSIONS = ['.vtt', '.srt'];
 let s3Client: S3Client | null = null;
+const STREAM_TICKET_TTL_SECONDS = 120;
+
+interface StreamTicketPayload {
+  episodeId: string;
+  at?: number;
+  exp: number;
+}
+
+function toBase64Url(raw: string): string {
+  return Buffer.from(raw, 'utf8').toString('base64url');
+}
+
+function fromBase64Url(value: string): string {
+  return Buffer.from(value, 'base64url').toString('utf8');
+}
+
+function signTicketPart(payloadPart: string): string {
+  return crypto
+    .createHmac('sha256', env.SUPABASE_SERVICE_ROLE_KEY)
+    .update(payloadPart)
+    .digest('base64url');
+}
+
+function createStreamTicket(episodeId: string, audioTrackIndex?: number): string {
+  const payload: StreamTicketPayload = {
+    episodeId,
+    ...(typeof audioTrackIndex === 'number' ? { at: audioTrackIndex } : {}),
+    exp: Date.now() + STREAM_TICKET_TTL_SECONDS * 1000,
+  };
+  const payloadPart = toBase64Url(JSON.stringify(payload));
+  const signaturePart = signTicketPart(payloadPart);
+  return `${payloadPart}.${signaturePart}`;
+}
+
+function verifyStreamTicket(ticket: string, episodeId: string): boolean {
+  const parts = ticket.split('.');
+  if (parts.length !== 2) return false;
+
+  const [payloadPart, signaturePart] = parts;
+  const expectedSignaturePart = signTicketPart(payloadPart);
+
+  try {
+    const provided = Buffer.from(signaturePart);
+    const expected = Buffer.from(expectedSignaturePart);
+    if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+      return false;
+    }
+
+    const payload = JSON.parse(fromBase64Url(payloadPart)) as StreamTicketPayload;
+    if (!payload || payload.episodeId !== episodeId || payload.exp <= Date.now()) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyBearerAuth(authHeader?: string): Promise<boolean> {
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+  if (!token) return false;
+
+  const { data, error } = await supabase.auth.getUser(token);
+  return !error && !!data.user;
+}
 
 function getS3Client(): S3Client {
   if (!s3Client) {
@@ -90,6 +164,66 @@ async function runProcess(command: string, args: string[]): Promise<{ code: numb
   });
 }
 
+async function getOrCreateAudioVariant(
+  sourcePath: string,
+  episodeId: string,
+  audioTrackIndex: number
+): Promise<string> {
+  const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
+  const sourceStat = await stat(sourcePath);
+  const sourceSignature = `${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}`;
+  const variantHash = crypto.createHash('sha1').update(sourceSignature).digest('hex').slice(0, 12);
+  const cacheDir = path.resolve(env.LOCAL_STORAGE_PATH, '.animind-audio-cache');
+  const outputPath = path.join(cacheDir, `${episodeId}-a${audioTrackIndex}-${variantHash}.mp4`);
+
+  await mkdir(cacheDir, { recursive: true });
+
+  try {
+    const cached = await stat(outputPath);
+    if (cached.size > 0) {
+      return outputPath;
+    }
+  } catch {
+    // Cache miss; build below.
+  }
+
+  // First attempt: copy both tracks as-is for speed and quality.
+  let result = await runProcess(ffmpegBin, [
+    '-y',
+    '-v', 'error',
+    '-i', sourcePath,
+    '-map', '0:v:0',
+    '-map', `0:${audioTrackIndex}`,
+    '-c:v', 'copy',
+    '-c:a', 'copy',
+    '-movflags', '+faststart',
+    outputPath,
+  ]).catch(() => null);
+
+  // Fallback: transcode audio if container/codec copy is incompatible.
+  if (!result || result.code !== 0) {
+    result = await runProcess(ffmpegBin, [
+      '-y',
+      '-v', 'error',
+      '-i', sourcePath,
+      '-map', '0:v:0',
+      '-map', `0:${audioTrackIndex}`,
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-movflags', '+faststart',
+      outputPath,
+    ]).catch(() => null);
+  }
+
+  if (!result || result.code !== 0) {
+    const stderr = result?.stderr?.trim() || 'ffmpeg remux failed';
+    throw new Error(stderr);
+  }
+
+  return outputPath;
+}
+
 async function getEmbeddedSubtitleTracks(fullVideoPath: string): Promise<SubtitleTrackPayload[]> {
   const ffprobeBin = process.env.FFPROBE_PATH || 'ffprobe';
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
@@ -161,6 +295,67 @@ async function getEmbeddedSubtitleTracks(fullVideoPath: string): Promise<Subtitl
       language,
       content,
     });
+  }
+
+  return tracks;
+}
+
+async function getEmbeddedAudioTracks(fullVideoPath: string): Promise<AudioTrackPayload[]> {
+  const ffprobeBin = process.env.FFPROBE_PATH || 'ffprobe';
+
+  let probeResult: { code: number; stdout: string; stderr: string };
+  try {
+    probeResult = await runProcess(ffprobeBin, [
+      '-v', 'error',
+      '-print_format', 'json',
+      '-show_streams',
+      '-select_streams', 'a',
+      fullVideoPath,
+    ]);
+  } catch {
+    return [];
+  }
+
+  if (probeResult.code !== 0 || !probeResult.stdout.trim()) {
+    return [];
+  }
+
+  let streams: any[] = [];
+  try {
+    const parsed = JSON.parse(probeResult.stdout) as { streams?: any[] };
+    streams = parsed.streams ?? [];
+  } catch {
+    return [];
+  }
+
+  if (!streams.length) {
+    return [];
+  }
+
+  const tracks: AudioTrackPayload[] = [];
+  let order = 1;
+
+  for (const stream of streams) {
+    if (typeof stream?.index !== 'number') continue;
+
+    const language = normalizeLanguage(stream?.tags?.language);
+    const title = stream?.tags?.title ? String(stream.tags.title) : '';
+    const codec = stream?.codec_name ? String(stream.codec_name).toUpperCase() : '';
+    const channels = typeof stream?.channels === 'number' ? `${stream.channels}ch` : '';
+    const metadataBits = [codec, channels].filter(Boolean).join(' / ');
+    const labelBase = title || `${language} Track ${order}`;
+    const label = metadataBits
+      ? `${labelBase} [#${stream.index}] (${metadataBits})`
+      : `${labelBase} [#${stream.index}]`;
+
+    tracks.push({
+      id: `audio-${stream.index}`,
+      label,
+      language,
+      streamIndex: stream.index,
+    });
+
+    order += 1;
   }
 
   return tracks;
@@ -249,6 +444,20 @@ async function getS3SubtitleTracks(filePath: string, bucketName: string): Promis
  */
 export async function streamEpisode(req: Request, res: Response) {
   const { id } = req.params;
+  const audioTrackParam = typeof req.query.at === 'string' ? req.query.at : undefined;
+  const selectedAudioTrackIndex =
+    typeof audioTrackParam === 'string' && /^\d+$/.test(audioTrackParam)
+      ? parseInt(audioTrackParam, 10)
+      : null;
+
+  const streamTicket = typeof req.query.st === 'string' ? req.query.st : undefined;
+  const hasValidBearer = await verifyBearerAuth(req.headers.authorization);
+  const hasValidTicket = !!streamTicket && verifyStreamTicket(streamTicket, id);
+
+  if (!hasValidBearer && !hasValidTicket) {
+    res.status(401).json({ error: 'Missing or invalid stream authorization.' });
+    return;
+  }
 
   // 1. Fetch episode record
   const { data: episode, error } = await supabase
@@ -278,7 +487,17 @@ export async function streamEpisode(req: Request, res: Response) {
     }
 
     // ── Local: HTTP Range-Request streaming ──────────────────────────────────
-    const filePath = streamInfo.url;
+    let filePath = streamInfo.url;
+    if (selectedAudioTrackIndex !== null) {
+      try {
+        filePath = await getOrCreateAudioVariant(filePath, id, selectedAudioTrackIndex);
+      } catch (variantError: any) {
+        console.error('[Stream][AudioVariant] Error:', variantError?.message || variantError);
+        res.status(400).json({ error: 'Selected audio track is unavailable for this episode.' });
+        return;
+      }
+    }
+
     let fileSize: number;
     try {
       const stats = await stat(filePath);
@@ -289,7 +508,7 @@ export async function streamEpisode(req: Request, res: Response) {
     }
 
     const rangeHeader = req.headers.range;
-    const mimeType = getMimeType(episode.file_path);
+    const mimeType = selectedAudioTrackIndex !== null ? 'video/mp4' : getMimeType(episode.file_path);
 
     if (rangeHeader) {
       const [startStr, endStr] = rangeHeader.replace(/bytes=/, '').split('-');
@@ -320,6 +539,36 @@ export async function streamEpisode(req: Request, res: Response) {
   }
 }
 
+/** GET /api/episodes/:id/stream-ticket
+ * Issues a short-lived, episode-scoped ticket for video element playback.
+ */
+export async function getEpisodeStreamTicket(req: Request, res: Response) {
+  const { id } = req.params;
+  const audioTrackParam = typeof req.query.at === 'string' ? req.query.at : undefined;
+  const selectedAudioTrackIndex =
+    typeof audioTrackParam === 'string' && /^\d+$/.test(audioTrackParam)
+      ? parseInt(audioTrackParam, 10)
+      : undefined;
+
+  const { data: episode, error } = await supabase
+    .from('episodes')
+    .select('id')
+    .eq('id', id)
+    .single();
+
+  if (error || !episode) {
+    res.status(404).json({ error: 'Episode not found.' });
+    return;
+  }
+
+  const ticket = createStreamTicket(id, selectedAudioTrackIndex);
+  const audioQuery = typeof selectedAudioTrackIndex === 'number' ? `&at=${selectedAudioTrackIndex}` : '';
+  res.json({
+    url: `/api/episodes/${encodeURIComponent(id)}/stream?st=${encodeURIComponent(ticket)}${audioQuery}`,
+    expiresIn: STREAM_TICKET_TTL_SECONDS,
+  });
+}
+
 /** GET /api/episodes/:id/subtitles
  * Returns subtitle tracks for an episode by looking for sidecar subtitle files
  * next to the video file in local storage or S3.
@@ -347,6 +596,38 @@ export async function getEpisodeSubtitles(req: Request, res: Response) {
   } catch (err: any) {
     console.error('[Subtitles] Error:', err.message);
     res.status(500).json({ error: 'Failed to load subtitles.' });
+  }
+}
+
+/** GET /api/episodes/:id/audio-tracks
+ * Returns discoverable embedded audio tracks (local mode only).
+ */
+export async function getEpisodeAudioTracks(req: Request, res: Response) {
+  const { id } = req.params;
+
+  const { data: episode, error } = await supabase
+    .from('episodes')
+    .select('id, file_path')
+    .eq('id', id)
+    .single();
+
+  if (error || !episode) {
+    res.status(404).json({ error: 'Episode not found.' });
+    return;
+  }
+
+  if (env.STORAGE_MODE === 's3') {
+    res.json({ tracks: [] as AudioTrackPayload[] });
+    return;
+  }
+
+  try {
+    const fullVideoPath = path.resolve(env.LOCAL_STORAGE_PATH, episode.file_path);
+    const tracks = await getEmbeddedAudioTracks(fullVideoPath);
+    res.json({ tracks });
+  } catch (err: any) {
+    console.error('[AudioTracks] Error:', err.message);
+    res.status(500).json({ error: 'Failed to load audio tracks.' });
   }
 }
 
