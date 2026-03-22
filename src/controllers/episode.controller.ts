@@ -25,7 +25,7 @@ interface AudioTrackPayload {
 
 const SUBTITLE_EXTENSIONS = ['.vtt', '.srt'];
 let s3Client: S3Client | null = null;
-const STREAM_TICKET_TTL_SECONDS = 120;
+const STREAM_TICKET_TTL_SECONDS = Math.max(120, env.STREAM_TICKET_TTL_SECONDS);
 
 interface StreamTicketPayload {
   episodeId: string;

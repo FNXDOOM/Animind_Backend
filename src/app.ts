@@ -4,7 +4,11 @@ import { env } from './config/env.js';
 import apiRouter from './routes/api.routes.js';
 
 const app = express();
-const allowedOrigins = env.FRONTEND_URL.split(',').map(origin => origin.trim()).filter(Boolean);
+const normalizeOrigin = (value: string) => value.trim().replace(/\/+$/, '');
+const allowedOrigins = env.FRONTEND_URL
+  .split(',')
+  .map(origin => normalizeOrigin(origin))
+  .filter(Boolean);
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
 app.use(
@@ -16,7 +20,7 @@ app.use(
         return;
       }
 
-      if (allowedOrigins.includes(origin)) {
+      if (allowedOrigins.includes(normalizeOrigin(origin))) {
         callback(null, true);
         return;
       }
