@@ -25,6 +25,7 @@ export const env = {
   S3_ACCESS_KEY_ID: process.env.S3_ACCESS_KEY_ID ?? '',
   S3_SECRET_ACCESS_KEY: process.env.S3_SECRET_ACCESS_KEY ?? '',
   S3_PRESIGN_EXPIRES: parseInt(process.env.S3_PRESIGN_EXPIRES ?? '14400', 10),
+  STREAM_TICKET_TTL_SECONDS: parseInt(process.env.STREAM_TICKET_TTL_SECONDS ?? '14400', 10),
 
   // Local
   LOCAL_STORAGE_PATH: process.env.LOCAL_STORAGE_PATH ?? '/mnt/anime',
