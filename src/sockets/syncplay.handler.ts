@@ -29,6 +29,21 @@ interface Room {
 // ── In-memory room store ─────────────────────────────────────────────────────
 const rooms = new Map<string, Room>();
 const userDisplayNameCache = new Map<string, string>();
+const SYNCPLAY_SOCKET_PATH = '/api/socket.io';
+
+async function closeStaleActiveWatchParties(): Promise<void> {
+  const { error } = await supabase
+    .from('watch_parties')
+    .update({ status: 'ended' })
+    .eq('status', 'active');
+
+  if (error) {
+    console.warn('[SyncPlay] Failed to close stale active watch parties:', error.message);
+    return;
+  }
+
+  console.log('[SyncPlay] Closed stale active watch parties from previous server sessions.');
+}
 
 function generateRoomCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -67,6 +82,7 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
     .filter(Boolean);
 
   const io = new SocketServer(httpServer, {
+    path: SYNCPLAY_SOCKET_PATH,
     cors: {
       origin: (origin, callback) => {
         if (!origin) {
@@ -86,6 +102,9 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       credentials: true,
     },
   });
+
+  // Rooms are in-memory; any DB row still marked active after restart is stale.
+  void closeStaleActiveWatchParties();
 
   // Auth middleware: validate JWT before socket connects
   io.use(async (socket, next) => {
@@ -107,12 +126,18 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
 
     // ── createRoom ────────────────────────────────────────────────────────────
     socket.on('createRoom', async ({ episodeId }: { episodeId: string }, callback) => {
+      const normalizedEpisodeId = typeof episodeId === 'string' ? episodeId.trim() : '';
+      if (!normalizedEpisodeId) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Episode is required.' });
+        return;
+      }
+
       let code = generateRoomCode();
       while (rooms.has(code)) code = generateRoomCode(); // ensure uniqueness
 
       const room: Room = {
         code,
-        episodeId,
+        episodeId: normalizedEpisodeId,
         hostSocketId: socket.id,
         hostUserId: userId,
         participants: new Map([[socket.id, userId]]),
@@ -125,13 +150,13 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       socket.join(code);
       (socket as any).roomCode = code;
 
-      console.log(`[SyncPlay] Room ${code} created by user ${userId} for episode ${episodeId}`);
+      console.log(`[SyncPlay] Room ${code} created by user ${userId} for episode ${normalizedEpisodeId}`);
 
       // Optionally persist to DB
       await supabase.from('watch_parties').insert({
         id: code,
         host_user_id: userId,
-        episode_id: episodeId,
+        episode_id: normalizedEpisodeId,
         status: 'active',
       }).then(({ error }) => {
         if (error) console.warn('[SyncPlay] DB insert warn:', error.message);
@@ -142,19 +167,25 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
 
     // ── joinRoom ──────────────────────────────────────────────────────────────
     socket.on('joinRoom', async ({ roomCode }: { roomCode: string }, callback) => {
-      const room = rooms.get(roomCode.toUpperCase());
+      const normalizedRoomCode = typeof roomCode === 'string' ? roomCode.trim().toUpperCase() : '';
+      if (!normalizedRoomCode) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Room code is required.' });
+        return;
+      }
+
+      const room = rooms.get(normalizedRoomCode);
       if (!room) {
         if (typeof callback === 'function') callback({ success: false, error: 'Room not found.' });
         return;
       }
 
       room.participants.set(socket.id, userId);
-      socket.join(roomCode.toUpperCase());
-      (socket as any).roomCode = roomCode.toUpperCase();
+      socket.join(normalizedRoomCode);
+      (socket as any).roomCode = normalizedRoomCode;
 
       // Persist participant
       await supabase.from('watch_party_participants').insert({
-        party_id: roomCode.toUpperCase(),
+        party_id: normalizedRoomCode,
         user_id: userId,
         joined_at: new Date().toISOString(),
       }).then(({ error }) => {
@@ -164,7 +195,7 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       const displayName = await getUserDisplayName(userId);
 
       // Notify others
-      socket.to(roomCode).emit('peerJoined', { userId, displayName, participantCount: room.participants.size });
+      socket.to(normalizedRoomCode).emit('peerJoined', { userId, displayName, participantCount: room.participants.size });
 
       if (typeof callback === 'function') {
         callback({
@@ -278,7 +309,10 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       if (room.participants.size === 0) {
         // Clean up empty room
         rooms.delete(code);
-        supabase.from('watch_parties').update({ status: 'ended' }).eq('id', code);
+        const { error } = await supabase.from('watch_parties').update({ status: 'ended' }).eq('id', code);
+        if (error) {
+          console.warn(`[SyncPlay] Failed to mark room ${code} as ended:`, error.message);
+        }
         console.log(`[SyncPlay] Room ${code} closed (all left).`);
       } else {
         // If host left, promote next participant
