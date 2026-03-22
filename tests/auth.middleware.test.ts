@@ -28,6 +28,7 @@ function createResponseMock(): ResponseLike {
 beforeAll(async () => {
   process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://example.supabase.co';
   process.env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'service-role-key';
+  process.env.WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'test-webhook-secret';
 
   ({ requireAuth, requireAdmin } = await import('../src/middleware/auth.middleware'));
   ({ supabase } = await import('../src/config/db'));
@@ -64,7 +65,7 @@ describe('requireAuth middleware', () => {
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('accepts token from query param and attaches user + admin status', async () => {
+  it('accepts token from bearer header and attaches user + admin status', async () => {
     vi.spyOn(supabase.auth, 'getUser').mockResolvedValue({
       data: { user: { id: 'user-123' } },
       error: null,
@@ -75,13 +76,13 @@ describe('requireAuth middleware', () => {
     const select = vi.fn().mockReturnValue({ eq });
     vi.spyOn(supabase, 'from').mockReturnValue({ select });
 
-    const req: AuthRequestLike = { headers: {}, query: { token: 'query-token' } };
+    const req: AuthRequestLike = { headers: { authorization: 'Bearer header-token' }, query: {} };
     const res = createResponseMock();
     const next = vi.fn();
 
     await requireAuth(req, res, next);
 
-    expect(supabase.auth.getUser).toHaveBeenCalledWith('query-token');
+    expect(supabase.auth.getUser).toHaveBeenCalledWith('header-token');
     expect(supabase.from).toHaveBeenCalledWith('profiles');
     expect(req.userId).toBe('user-123');
     expect(req.isAdmin).toBe(true);

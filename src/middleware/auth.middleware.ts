@@ -12,9 +12,7 @@ export interface AuthRequest extends Request {
  */
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
-  const queryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
-  const token = bearerToken ?? queryToken;
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
 
   if (!token) {
     res.status(401).json({ error: 'Missing or invalid authorization token.' });

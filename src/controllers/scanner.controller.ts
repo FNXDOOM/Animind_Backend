@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { runScan } from '../services/scanner.service.js';
 import { supabase } from '../config/db.js';
+import { env } from '../config/env.js';
 
 /**
  * POST /api/rescan
@@ -52,8 +53,9 @@ export async function rescanLibrary(req: Request, res: Response) {
  * This should be protected by a secret header in production.
  */
 export async function storageWebhook(req: Request, res: Response) {
-  const secret = req.headers['x-webhook-secret'];
-  if (process.env.WEBHOOK_SECRET && secret !== process.env.WEBHOOK_SECRET) {
+  const rawSecret = req.headers['x-webhook-secret'];
+  const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+  if (secret !== env.WEBHOOK_SECRET) {
     res.status(401).json({ error: 'Invalid webhook secret.' });
     return;
   }

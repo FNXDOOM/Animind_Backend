@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { createReadStream } from 'fs';
 import { stat, readFile, readdir } from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import { supabase } from '../config/db.js';
@@ -17,6 +18,70 @@ interface SubtitleTrackPayload {
 
 const SUBTITLE_EXTENSIONS = ['.vtt', '.srt'];
 let s3Client: S3Client | null = null;
+const STREAM_TICKET_TTL_SECONDS = 120;
+
+interface StreamTicketPayload {
+  episodeId: string;
+  exp: number;
+}
+
+function toBase64Url(raw: string): string {
+  return Buffer.from(raw, 'utf8').toString('base64url');
+}
+
+function fromBase64Url(value: string): string {
+  return Buffer.from(value, 'base64url').toString('utf8');
+}
+
+function signTicketPart(payloadPart: string): string {
+  return crypto
+    .createHmac('sha256', env.SUPABASE_SERVICE_ROLE_KEY)
+    .update(payloadPart)
+    .digest('base64url');
+}
+
+function createStreamTicket(episodeId: string): string {
+  const payload: StreamTicketPayload = {
+    episodeId,
+    exp: Date.now() + STREAM_TICKET_TTL_SECONDS * 1000,
+  };
+  const payloadPart = toBase64Url(JSON.stringify(payload));
+  const signaturePart = signTicketPart(payloadPart);
+  return `${payloadPart}.${signaturePart}`;
+}
+
+function verifyStreamTicket(ticket: string, episodeId: string): boolean {
+  const parts = ticket.split('.');
+  if (parts.length !== 2) return false;
+
+  const [payloadPart, signaturePart] = parts;
+  const expectedSignaturePart = signTicketPart(payloadPart);
+
+  try {
+    const provided = Buffer.from(signaturePart);
+    const expected = Buffer.from(expectedSignaturePart);
+    if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+      return false;
+    }
+
+    const payload = JSON.parse(fromBase64Url(payloadPart)) as StreamTicketPayload;
+    if (!payload || payload.episodeId !== episodeId || payload.exp <= Date.now()) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyBearerAuth(authHeader?: string): Promise<boolean> {
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+  if (!token) return false;
+
+  const { data, error } = await supabase.auth.getUser(token);
+  return !error && !!data.user;
+}
 
 function getS3Client(): S3Client {
   if (!s3Client) {
@@ -250,6 +315,15 @@ async function getS3SubtitleTracks(filePath: string, bucketName: string): Promis
 export async function streamEpisode(req: Request, res: Response) {
   const { id } = req.params;
 
+  const streamTicket = typeof req.query.st === 'string' ? req.query.st : undefined;
+  const hasValidBearer = await verifyBearerAuth(req.headers.authorization);
+  const hasValidTicket = !!streamTicket && verifyStreamTicket(streamTicket, id);
+
+  if (!hasValidBearer && !hasValidTicket) {
+    res.status(401).json({ error: 'Missing or invalid stream authorization.' });
+    return;
+  }
+
   // 1. Fetch episode record
   const { data: episode, error } = await supabase
     .from('episodes')
@@ -318,6 +392,30 @@ export async function streamEpisode(req: Request, res: Response) {
     console.error('[Stream] Error:', err.message);
     res.status(500).json({ error: 'Streaming failed.' });
   }
+}
+
+/** GET /api/episodes/:id/stream-ticket
+ * Issues a short-lived, episode-scoped ticket for video element playback.
+ */
+export async function getEpisodeStreamTicket(req: Request, res: Response) {
+  const { id } = req.params;
+
+  const { data: episode, error } = await supabase
+    .from('episodes')
+    .select('id')
+    .eq('id', id)
+    .single();
+
+  if (error || !episode) {
+    res.status(404).json({ error: 'Episode not found.' });
+    return;
+  }
+
+  const ticket = createStreamTicket(id);
+  res.json({
+    url: `/api/episodes/${encodeURIComponent(id)}/stream?st=${encodeURIComponent(ticket)}`,
+    expiresIn: STREAM_TICKET_TTL_SECONDS,
+  });
 }
 
 /** GET /api/episodes/:id/subtitles

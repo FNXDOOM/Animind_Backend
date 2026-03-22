@@ -11,6 +11,7 @@ export const env = {
   PORT: parseInt(process.env.PORT ?? '3001', 10),
   NODE_ENV: process.env.NODE_ENV ?? 'development',
   FRONTEND_URL: process.env.FRONTEND_URL ?? 'http://localhost:3000,http://localhost:5173',
+  WEBHOOK_SECRET: requireEnv('WEBHOOK_SECRET'),
 
   SUPABASE_URL: requireEnv('SUPABASE_URL'),
   SUPABASE_SERVICE_ROLE_KEY: requireEnv('SUPABASE_SERVICE_ROLE_KEY'),

@@ -17,6 +17,9 @@ const controllerMocks = vi.hoisted(() => ({
   streamEpisode: vi.fn((req, res) => {
     res.status(200).json({ url: `https://stream.local/${req.params.id}` });
   }),
+  getEpisodeStreamTicket: vi.fn((req, res) => {
+    res.status(200).json({ url: `/api/episodes/${req.params.id}/stream?st=signed-ticket`, expiresIn: 120 });
+  }),
   getEpisodeSubtitles: vi.fn((_req, res) => {
     res.status(200).json({ tracks: [{ id: 'en' }] });
   }),
@@ -49,6 +52,7 @@ vi.mock('../src/controllers/scanner.controller.js', () => ({
 
 vi.mock('../src/controllers/episode.controller.js', () => ({
   streamEpisode: controllerMocks.streamEpisode,
+  getEpisodeStreamTicket: controllerMocks.getEpisodeStreamTicket,
   getEpisodeSubtitles: controllerMocks.getEpisodeSubtitles,
 }));
 
@@ -87,6 +91,7 @@ let app: any;
 beforeAll(async () => {
   process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://example.supabase.co';
   process.env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'service-role-key';
+  process.env.WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'test-webhook-secret';
   process.env.FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
   ({ default: app } = await import('../src/app'));
@@ -113,20 +118,40 @@ describe('app + api routes', () => {
     expect(response.body.data[0].title).toBe('Frieren');
   });
 
-  it('POST /api/rescan returns scan payload', async () => {
-    const response = await request(app).post('/api/rescan');
+  it('POST /api/rescan denies non-admin token', async () => {
+    const response = await request(app)
+      .post('/api/rescan')
+      .set('Authorization', 'Bearer user-token');
+
+    expect(response.status).toBe(403);
+    expect(controllerMocks.rescanLibrary).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/rescan returns scan payload for admin', async () => {
+    const response = await request(app)
+      .post('/api/rescan')
+      .set('Authorization', 'Bearer admin-token');
 
     expect(response.status).toBe(200);
     expect(controllerMocks.rescanLibrary).toHaveBeenCalledTimes(1);
     expect(response.body[0].id).toBe('show-2');
   });
 
-  it('GET /api/episodes/:id/stream requires auth', async () => {
-    const response = await request(app).get('/api/episodes/ep-1/stream');
+  it('GET /api/episodes/:id/stream-ticket requires auth', async () => {
+    const response = await request(app).get('/api/episodes/ep-1/stream-ticket');
 
     expect(response.status).toBe(401);
     expect(response.body.error).toBe('Missing or invalid authorization token.');
-    expect(controllerMocks.streamEpisode).not.toHaveBeenCalled();
+    expect(controllerMocks.getEpisodeStreamTicket).not.toHaveBeenCalled();
+  });
+
+  it('GET /api/episodes/:id/stream-ticket succeeds with auth', async () => {
+    const response = await request(app)
+      .get('/api/episodes/ep-1/stream-ticket')
+      .set('Authorization', 'Bearer user-token');
+
+    expect(response.status).toBe(200);
+    expect(controllerMocks.getEpisodeStreamTicket).toHaveBeenCalledTimes(1);
   });
 
   it('GET /api/episodes/:id/stream succeeds with auth', async () => {
