@@ -51,7 +51,5 @@ services:
         max-file: "5"
 
     # ── Local storage volume ─────────────────────────────────────────────────
-    # Uncomment ONLY when STORAGE_MODE=local and videos live on the VPS disk.
-    # Mount as read-only so the container can never delete your files.
-    # volumes:
-    #   - /mnt/anime:/mnt/anime:ro
+    volumes:
+      - /mnt/anime:/mnt/anime:ro
