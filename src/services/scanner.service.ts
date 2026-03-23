@@ -68,6 +68,8 @@ async function listLocalFiles(dir: string, base = dir): Promise<string[]> {
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
+      // Skip the audio variant cache folder — those are not real episodes
+      if (entry.name === '.animind-audio-cache') continue;
       results.push(...(await listLocalFiles(fullPath, base)));
     } else if (entry.isFile() && isVideoFile(entry.name)) {
       // Store relative path from base dir
@@ -260,7 +262,15 @@ async function extractSubtitlesToDisk(filePath: string): Promise<void> {
 
   if (!streams.length) return;
 
-  const unsupportedCodecs = new Set(['hdmv_pgs_subtitle', 'dvd_subtitle', 'xsub']);
+  // Image-based subtitle formats that cannot be converted to VTT by ffmpeg
+  const unsupportedCodecs = new Set([
+    'hdmv_pgs_subtitle',  // Blu-ray PGS
+    'dvd_subtitle',       // DVD bitmap subs
+    'xsub',              // DivX bitmap subs
+    'dvb_subtitle',       // DVB bitmap subs
+    'dvb_teletext',       // Teletext
+  ]);
+
   let extracted = 0;
 
   // Track language counts to handle duplicates (e.g. two English tracks)
@@ -269,6 +279,8 @@ async function extractSubtitlesToDisk(filePath: string): Promise<void> {
   for (const stream of streams) {
     if (typeof stream?.index !== 'number') continue;
     const codec = String(stream?.codec_name ?? '').toLowerCase();
+
+    // Silently skip image-based codecs — no warning needed, they're expected
     if (unsupportedCodecs.has(codec)) continue;
 
     const language = normalizeLanguage(stream?.tags?.language);
@@ -297,7 +309,8 @@ async function extractSubtitlesToDisk(filePath: string): Promise<void> {
       console.log(`[Scanner] Extracted subtitle: ${vttFileName}`);
       extracted++;
     } else {
-      console.warn(`[Scanner] Failed to extract subtitle stream ${stream.index} from ${filePath}`);
+      // Log codec name so we can add it to unsupportedCodecs if needed
+      console.warn(`[Scanner] Could not convert stream ${stream.index} (codec: ${codec}) from ${path.basename(filePath)} to VTT — skipping.`);
       // Clean up empty/partial file if ffmpeg wrote one
       import('fs').then(fs => fs.promises.unlink(vttFilePath).catch(() => undefined));
     }
