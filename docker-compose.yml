@@ -24,13 +24,15 @@ services:
         hard: 65536
 
     # ── Resource limits ──────────────────────────────────────────────────────
-    # Prevent a runaway process from eating all VPS memory.
+    # 2 core / 1GB RAM VPS — leave ~200MB headroom for the OS and Nginx.
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 700M
+          cpus: '1.5'
         reservations:
-          memory: 128M
+          memory: 256M
+          cpus: '0.5'
 
     # ── Health check (uses curl installed in Dockerfile) ─────────────────────
     # Matches the HEALTHCHECK directive in the Dockerfile; compose overrides
