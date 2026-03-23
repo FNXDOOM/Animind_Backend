@@ -588,6 +588,9 @@ export async function getEpisodeSubtitles(req: Request, res: Response) {
   }
 
   try {
+    // Subtitles are extracted to .vtt files on disk during scan.
+    // getLocalSubtitleTracks already picks them up as sidecar files —
+    // instant load after the first scan, no ffprobe needed at play time.
     const tracks = env.STORAGE_MODE === 's3'
       ? await getS3SubtitleTracks(episode.file_path, episode.bucket_name)
       : await getLocalSubtitleTracks(episode.file_path);
