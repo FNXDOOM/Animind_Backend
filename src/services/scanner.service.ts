@@ -299,12 +299,15 @@ async function extractSubtitlesToDisk(filePath: string): Promise<void> {
     // Extract subtitle stream directly to .vtt file on disk.
     // Run via 'nice -n 19' so ffmpeg uses leftover CPU only and never
     // competes with Node or active video stream requests.
+    // ASS/SSA and SRT subtitles need the 'webvtt' format + explicit codec.
+    const isTextSub = ['ass', 'ssa', 'subrip', 'srt', 'mov_text'].includes(codec);
     const result = await runProcess('nice', [
       '-n', '19',
       ffmpegBin,
       '-v', 'error',
       '-i', fullVideoPath,
       '-map', `0:${stream.index}`,
+      ...(isTextSub ? ['-c:s', 'webvtt'] : []),
       '-f', 'webvtt',
       vttFilePath,
     ]).catch(() => null);
