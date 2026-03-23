@@ -296,8 +296,12 @@ async function extractSubtitlesToDisk(filePath: string): Promise<void> {
       continue;
     } catch { /* doesn't exist yet, extract it */ }
 
-    // Extract subtitle stream directly to .vtt file on disk
-    const result = await runProcess(ffmpegBin, [
+    // Extract subtitle stream directly to .vtt file on disk.
+    // Run via 'nice -n 19' so ffmpeg uses leftover CPU only and never
+    // competes with Node or active video stream requests.
+    const result = await runProcess('nice', [
+      '-n', '19',
+      ffmpegBin,
       '-v', 'error',
       '-i', fullVideoPath,
       '-map', `0:${stream.index}`,
@@ -374,9 +378,10 @@ export async function runScan(): Promise<ScanResult> {
       result.inserted++;
 
       // Extract embedded subtitles to .vtt files next to the video.
-      // Runs in the background so it doesn't block the scan loop.
-      // On the next scan, already-extracted .vtt files are skipped.
-      extractSubtitlesToDisk(filePath).catch((err: any) =>
+      // Awaited sequentially — on a 2-core/1GB VPS running concurrent ffmpeg
+      // processes causes CPU/memory spikes that kill streaming for active users.
+      // Already-extracted .vtt files are skipped on subsequent scans.
+      await extractSubtitlesToDisk(filePath).catch((err: any) =>
         console.error(`[Scanner] Subtitle extraction error for ${filePath}:`, err.message)
       );
     } catch (err: any) {
