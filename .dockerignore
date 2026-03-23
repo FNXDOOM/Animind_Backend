@@ -1,9 +1,42 @@
+# Dependencies — always reinstalled inside the container
 node_modules
+
+# Compiled output — built fresh inside the container
 dist
+
+# Version control
 .git
 .gitignore
-npm-debug.log*
+.gitattributes
+
+# Secrets — injected at runtime via env_file or environment variables
 .env
 .env.*
+
+# Logs
+npm-debug.log*
+*.log
+
+# Test artefacts
 coverage
+tests
+
+# TypeScript incremental build cache
 *.tsbuildinfo
+
+# Editor / OS noise
+.vscode
+.idea
+*.DS_Store
+Thumbs.db
+
+# Docker files themselves (no need to COPY into the image)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Docs
+DOCKER_VPS_README.md
+RUN.md
+README.md
+backend-docs
