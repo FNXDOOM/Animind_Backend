@@ -367,6 +367,21 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       console.log(`[SyncPlay] Room ${code} episode changed to ${episodeId} by host ${userId}`);
     });
 
+    // ── NTP-style clock sync ping/pong ────────────────────────────────────────
+    // Client sends { clientSendTime } → server echoes back { clientSendTime, serverTime }.
+    // Client computes:
+    //   roundTrip     = Date.now() - clientSendTime
+    //   oneWayLatency = roundTrip / 2
+    //   clockOffset   = serverTime - (clientSendTime + oneWayLatency)
+    // After TIMESYNC_SAMPLES rounds, client takes the median clockOffset and
+    // uses it to correct all sentAt timestamps, eliminating clock-skew error.
+    socket.on('timesync_ping', ({ clientSendTime }: { clientSendTime: number }) => {
+      socket.emit('timesync_pong', {
+        clientSendTime,          // echoed so client can compute RTT
+        serverTime: Date.now(),  // server wall-clock at the moment of receipt
+      });
+    });
+
     // ── sync request (late joiner asks host for current time) ────────────────
     socket.on('requestSync', () => {
       const code = (socket as any).roomCode;
