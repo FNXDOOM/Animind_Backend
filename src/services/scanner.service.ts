@@ -316,8 +316,9 @@ async function extractSubtitlesToDisk(filePath: string): Promise<void> {
       console.log(`[Scanner] Extracted subtitle: ${vttFileName}`);
       extracted++;
     } else {
-      // Log codec name so we can add it to unsupportedCodecs if needed
-      console.warn(`[Scanner] Could not convert stream ${stream.index} (codec: ${codec}) from ${path.basename(filePath)} to VTT — skipping.`);
+      // Log codec + actual ffmpeg stderr so we can diagnose unknown failures
+      const reason = result?.stderr?.trim().split('\n').pop() ?? 'unknown error';
+      console.warn(`[Scanner] Could not convert stream ${stream.index} (codec: ${codec}) from ${path.basename(filePath)} to VTT — ${reason}`);
       // Clean up empty/partial file if ffmpeg wrote one
       import('fs').then(fs => fs.promises.unlink(vttFilePath).catch(() => undefined));
     }
