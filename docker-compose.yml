@@ -52,4 +52,4 @@ services:
 
     # ── Local storage volume ─────────────────────────────────────────────────
     volumes:
-      - /mnt/anime:/mnt/anime:ro
+      - /mnt/anime:/mnt/anime
