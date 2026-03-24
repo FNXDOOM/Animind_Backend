@@ -7,6 +7,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
+    "migrate:subtitles": "tsx src/scripts/migrateSubtitles.ts",
+    "migrate:subtitles:apply": "tsx src/scripts/migrateSubtitles.ts --apply",
     "lint": "eslint src --ext .ts",
     "test": "vitest run",
     "test:watch": "vitest"

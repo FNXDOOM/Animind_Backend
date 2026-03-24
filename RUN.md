@@ -418,6 +418,27 @@ const socket = io(VITE_CLOUD_SERVER_URL, {
 
 ## 12. Troubleshooting
 
+### Reorganize existing subtitle files (one-time migration)
+
+If you previously had subtitle sidecar files next to videos (for example `Frieren - 01.English.vtt`),
+you can move them into the new structured layout:
+
+`Show/Subtitles/Episode XX/*.vtt`
+
+Run a dry-run first:
+
+```bash
+npm run migrate:subtitles
+```
+
+Apply the migration when the preview looks correct:
+
+```bash
+npm run migrate:subtitles:apply
+```
+
+Then run a rescan to ensure fresh subtitle extraction follows the same folder layout.
+
 **"Missing required env variable: SUPABASE_URL"**
 → Make sure `.env` exists and is in the project root (not inside `src/`).
 

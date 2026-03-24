@@ -152,6 +152,17 @@ function normalizeLanguage(raw?: string): string {
   return raw;
 }
 
+function formatEpisodeFolderName(episodeNumber: number): string {
+  const width = episodeNumber >= 100 ? 3 : 2;
+  return `Episode ${String(episodeNumber).padStart(width, '0')}`;
+}
+
+function getShowRootDirFromEpisodePath(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, '/');
+  const [showFolder] = normalized.split('/');
+  return path.resolve(env.LOCAL_STORAGE_PATH, showFolder || '');
+}
+
 async function runProcess(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true });
@@ -370,10 +381,55 @@ async function getEmbeddedAudioTracks(fullVideoPath: string): Promise<AudioTrack
   return tracks;
 }
 
-async function getLocalSubtitleTracks(filePath: string): Promise<SubtitleTrackPayload[]> {
+async function getLocalSubtitleTracks(filePath: string, episodeNumber?: number): Promise<SubtitleTrackPayload[]> {
   const fullVideoPath = path.resolve(env.LOCAL_STORAGE_PATH, filePath);
   const dir = path.dirname(fullVideoPath);
   const baseName = path.parse(fullVideoPath).name;
+
+  const loadSubtitleFilesFromDirectory = async (directoryPath: string): Promise<SubtitleTrackPayload[]> => {
+    let fileNames: string[] = [];
+    try {
+      fileNames = await readdir(directoryPath);
+    } catch {
+      return [];
+    }
+
+    const subtitleFiles = fileNames.filter(name => SUBTITLE_EXTENSIONS.includes(path.extname(name).toLowerCase()));
+    const tracks: SubtitleTrackPayload[] = [];
+
+    for (const subtitleFile of subtitleFiles) {
+      const ext = path.extname(subtitleFile).toLowerCase();
+      if (!SUBTITLE_EXTENSIONS.includes(ext)) continue;
+
+      const content = await readFile(path.join(directoryPath, subtitleFile), 'utf-8');
+      tracks.push({
+        id: subtitleFile,
+        label: subtitleFile,
+        language: languageFromFilename(subtitleFile),
+        content: subtitleToVtt(content, ext),
+      });
+    }
+
+    return tracks;
+  };
+
+  if (typeof episodeNumber === 'number' && episodeNumber > 0) {
+    const subtitlesRoot = path.join(getShowRootDirFromEpisodePath(filePath), 'Subtitles');
+    const preferredEpisodeDir = path.join(subtitlesRoot, formatEpisodeFolderName(episodeNumber));
+    const fallbackEpisodeDir = path.join(subtitlesRoot, `Episode ${episodeNumber}`);
+
+    const structuredTracks = await loadSubtitleFilesFromDirectory(preferredEpisodeDir);
+    if (structuredTracks.length > 0) {
+      return structuredTracks;
+    }
+
+    if (fallbackEpisodeDir !== preferredEpisodeDir) {
+      const fallbackTracks = await loadSubtitleFilesFromDirectory(fallbackEpisodeDir);
+      if (fallbackTracks.length > 0) {
+        return fallbackTracks;
+      }
+    }
+  }
 
   let entries: string[] = [];
   try {
@@ -466,7 +522,7 @@ export async function streamEpisode(req: Request, res: Response) {
   // 1. Fetch episode record
   const { data: episode, error } = await supabase
     .from('episodes')
-    .select('id, file_path, bucket_name')
+    .select('id, file_path, bucket_name, episode_number')
     .eq('id', id)
     .single();
 
@@ -595,7 +651,7 @@ export async function getEpisodeSubtitles(req: Request, res: Response) {
 
   const { data: episode, error } = await supabase
     .from('episodes')
-    .select('id, file_path, bucket_name')
+    .select('id, file_path, bucket_name, episode_number')
     .eq('id', id)
     .single();
 
@@ -610,7 +666,7 @@ export async function getEpisodeSubtitles(req: Request, res: Response) {
     // instant load after the first scan, no ffprobe needed at play time.
     const tracks = env.STORAGE_MODE === 's3'
       ? await getS3SubtitleTracks(episode.file_path, episode.bucket_name)
-      : await getLocalSubtitleTracks(episode.file_path);
+      : await getLocalSubtitleTracks(episode.file_path, episode.episode_number);
 
     res.json({ tracks });
   } catch (err: any) {
