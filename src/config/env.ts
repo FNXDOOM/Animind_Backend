@@ -27,11 +27,6 @@ export const env = {
   S3_PRESIGN_EXPIRES: parseInt(process.env.S3_PRESIGN_EXPIRES ?? '14400', 10),
   STREAM_TICKET_TTL_SECONDS: parseInt(process.env.STREAM_TICKET_TTL_SECONDS ?? '14400', 10),
   STREAM_RANGE_CHUNK_MB: parseInt(process.env.STREAM_RANGE_CHUNK_MB ?? '8', 10),
-  MOBILE_COMPAT_FALLBACK_ENABLED: process.env.MOBILE_COMPAT_FALLBACK_ENABLED !== 'false',
-  MOBILE_COMPAT_UNSUPPORTED_EXTENSIONS: (process.env.MOBILE_COMPAT_UNSUPPORTED_EXTENSIONS ?? 'mkv,avi')
-    .split(',')
-    .map(e => e.trim().toLowerCase())
-    .filter(Boolean),
 
   // Local
   LOCAL_STORAGE_PATH: process.env.LOCAL_STORAGE_PATH ?? '/mnt/anime',
