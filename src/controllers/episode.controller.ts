@@ -111,8 +111,15 @@ function toPosix(filePath: string): string {
   return filePath.replace(/\\/g, '/');
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function isMatchingSubtitleSidecar(fileName: string, videoBaseName: string): boolean {
+  const fileNameLower = fileName.toLowerCase();
+  const baseNameLower = videoBaseName.toLowerCase();
+
+  if (!fileNameLower.startsWith(baseNameLower)) return false;
+
+  const rest = fileNameLower.slice(baseNameLower.length);
+  // Accept both "Episode 01.vtt" and "Episode 01.English.vtt" patterns.
+  return /^\.(vtt|srt)$/.test(rest) || /^[._ -].+\.(vtt|srt)$/.test(rest);
 }
 
 function subtitleToVtt(content: string, extension: string): string {
@@ -373,17 +380,7 @@ async function getLocalSubtitleTracks(filePath: string): Promise<SubtitleTrackPa
     return [];
   }
 
-  // Match sidecar subtitle files that start with the video base name.
-  // Use a simple startsWith check instead of regex to avoid escaping issues
-  // with special characters in filenames like 'Frieren - 01' (hyphens, spaces).
-  const baseNameLower = baseName.toLowerCase();
-  const subtitleFiles = entries.filter(name => {
-    const nameLower = name.toLowerCase();
-    if (!nameLower.startsWith(baseNameLower)) return false;
-    const rest = nameLower.slice(baseNameLower.length);
-    // Must have a separator then extension — e.g. '.English.vtt' or '.en.srt'
-    return /^[._ -].+\.(vtt|srt)$/.test(rest);
-  });
+  const subtitleFiles = entries.filter(name => isMatchingSubtitleSidecar(name, baseName));
 
   const tracks: SubtitleTrackPayload[] = [];
   for (const subtitleFile of subtitleFiles) {
@@ -409,7 +406,6 @@ async function getS3SubtitleTracks(filePath: string, bucketName: string): Promis
   const objectKey = toPosix(filePath);
   const parsed = path.posix.parse(objectKey);
   const prefix = parsed.dir ? `${parsed.dir}/` : '';
-  const pattern = new RegExp(`^${escapeRegex(parsed.name)}([._ -].+)?\\.(vtt|srt)$`, 'i');
 
   const client = getS3Client();
   const listRes = await client.send(new ListObjectsV2Command({
@@ -420,7 +416,7 @@ async function getS3SubtitleTracks(filePath: string, bucketName: string): Promis
   const candidateKeys = (listRes.Contents ?? [])
     .map(item => item.Key)
     .filter((key): key is string => !!key)
-    .filter(key => pattern.test(path.posix.basename(key)));
+    .filter(key => isMatchingSubtitleSidecar(path.posix.basename(key), parsed.name));
 
   const tracks: SubtitleTrackPayload[] = [];
   for (const key of candidateKeys) {
