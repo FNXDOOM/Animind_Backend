@@ -6,7 +6,7 @@
  */
 
 import { S3Client, ListObjectsV2Command, ListObjectsV2CommandOutput } from '@aws-sdk/client-s3';
-import { readdir, stat } from 'fs/promises';
+import { readdir, stat, mkdir } from 'fs/promises';
 import { spawn } from 'child_process';
 import path from 'path';
 import { env } from '../config/env.js';
@@ -202,14 +202,12 @@ async function pruneDeletedFiles(foundPaths: Set<string>) {
   }
 }
 
-// ── Subtitle extraction → .vtt files on disk ────────────────────────────────────
-// During scan, embedded subtitle streams are extracted from each .mkv and
-// saved as .vtt files next to the video file:
-//   /mnt/anime/Show/Episode 01.mkv
-//   /mnt/anime/Show/Episode 01.English.vtt   ← created here
-//   /mnt/anime/Show/Episode 01.Japanese.vtt  ← created here
-// The existing getLocalSubtitleTracks() in episode.controller.ts already
-// scans for .vtt sidecar files, so subtitles load instantly after the first scan.
+// ── Subtitle extraction → organized .vtt files on disk ──────────────────────────
+// During scan, embedded subtitle streams are extracted from each video and saved
+// under a per-show, per-episode structure:
+//   /mnt/anime/Show/Subtitles/Episode 01/English.vtt
+//   /mnt/anime/Show/Subtitles/Episode 01/Japanese.vtt
+// This keeps show roots clean while still allowing legacy sidecar fallback reads.
 
 function runProcess(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -232,15 +230,28 @@ function normalizeLanguage(raw?: string): string {
   return raw;
 }
 
-async function extractSubtitlesToDisk(filePath: string): Promise<void> {
+function getShowRootDirectory(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, '/');
+  const [showFolder] = normalized.split('/');
+  return path.resolve(env.LOCAL_STORAGE_PATH, showFolder || '');
+}
+
+function formatEpisodeFolder(episodeNumber: number): string {
+  const width = episodeNumber >= 100 ? 3 : 2;
+  return `Episode ${String(episodeNumber).padStart(width, '0')}`;
+}
+
+async function extractSubtitlesToDisk(filePath: string, episodeNumber: number): Promise<void> {
   // Only for local mode — S3 files can't be piped through ffmpeg this way
   if (env.STORAGE_MODE !== 'local') return;
 
   const fullVideoPath = path.resolve(env.LOCAL_STORAGE_PATH, filePath);
-  const videoDir      = path.dirname(fullVideoPath);
-  const videoBaseName = path.parse(fullVideoPath).name;
-  const ffprobeBin    = process.env.FFPROBE_PATH || 'ffprobe';
-  const ffmpegBin     = process.env.FFMPEG_PATH  || 'ffmpeg';
+  const showRootDir = getShowRootDirectory(filePath);
+  const subtitlesDir = path.join(showRootDir, 'Subtitles', formatEpisodeFolder(episodeNumber));
+  const ffprobeBin = process.env.FFPROBE_PATH || 'ffprobe';
+  const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
+
+  await mkdir(subtitlesDir, { recursive: true });
 
   // 1. Probe for subtitle streams
   let probeResult: { code: number; stdout: string; stderr: string };
@@ -267,44 +278,36 @@ async function extractSubtitlesToDisk(filePath: string): Promise<void> {
 
   if (!streams.length) return;
 
-  // Image-based subtitle formats that cannot be converted to VTT by ffmpeg
   const unsupportedCodecs = new Set([
-    'hdmv_pgs_subtitle',  // Blu-ray PGS
-    'dvd_subtitle',       // DVD bitmap subs
-    'xsub',              // DivX bitmap subs
-    'dvb_subtitle',       // DVB bitmap subs
-    'dvb_teletext',       // Teletext
+    'hdmv_pgs_subtitle',
+    'dvd_subtitle',
+    'xsub',
+    'dvb_subtitle',
+    'dvb_teletext',
   ]);
 
   let extracted = 0;
-
-  // Track language counts to handle duplicates (e.g. two English tracks)
   const langCount: Record<string, number> = {};
 
   for (const stream of streams) {
     if (typeof stream?.index !== 'number') continue;
     const codec = String(stream?.codec_name ?? '').toLowerCase();
-
-    // Silently skip image-based codecs — no warning needed, they're expected
     if (unsupportedCodecs.has(codec)) continue;
 
     const language = normalizeLanguage(stream?.tags?.language);
     langCount[language] = (langCount[language] ?? 0) + 1;
-    const suffix      = langCount[language] > 1 ? `${language}.${langCount[language]}` : language;
-    const vttFileName = `${videoBaseName}.${suffix}.vtt`;
-    const vttFilePath = path.join(videoDir, vttFileName);
+    const suffix = langCount[language] > 1 ? `${language}.${langCount[language]}` : language;
+    const vttFileName = `${suffix}.vtt`;
+    const vttFilePath = path.join(subtitlesDir, vttFileName);
 
-    // Skip if the .vtt file already exists — no need to re-extract on every scan
     try {
       await stat(vttFilePath);
-      console.log(`[Scanner] Subtitle already exists: ${vttFileName}`);
+      console.log(`[Scanner] Subtitle already exists: ${path.join('Subtitles', formatEpisodeFolder(episodeNumber), vttFileName)}`);
       continue;
-    } catch { /* doesn't exist yet, extract it */ }
+    } catch {
+      // Doesn't exist yet, extract it.
+    }
 
-    // Extract subtitle stream directly to .vtt file on disk.
-    // Run via 'nice -n 19' so ffmpeg uses leftover CPU only and never
-    // competes with Node or active video stream requests.
-    // ASS/SSA and SRT subtitles need the 'webvtt' format + explicit codec.
     const isTextSub = ['ass', 'ssa', 'subrip', 'srt', 'mov_text'].includes(codec);
     const result = await runProcess('nice', [
       '-n', '19',
@@ -318,19 +321,17 @@ async function extractSubtitlesToDisk(filePath: string): Promise<void> {
     ]).catch(() => null);
 
     if (result && result.code === 0) {
-      console.log(`[Scanner] Extracted subtitle: ${vttFileName}`);
+      console.log(`[Scanner] Extracted subtitle: ${path.join('Subtitles', formatEpisodeFolder(episodeNumber), vttFileName)}`);
       extracted++;
     } else {
-      // Log codec + actual ffmpeg stderr so we can diagnose unknown failures
       const reason = result?.stderr?.trim().split('\n').pop() ?? 'unknown error';
       console.warn(`[Scanner] Could not convert stream ${stream.index} (codec: ${codec}) from ${path.basename(filePath)} to VTT — ${reason}`);
-      // Clean up empty/partial file if ffmpeg wrote one
       import('fs').then(fs => fs.promises.unlink(vttFilePath).catch(() => undefined));
     }
   }
 
   if (extracted > 0) {
-    console.log(`[Scanner] Saved ${extracted} subtitle file(s) for ${path.basename(filePath)}.`);
+    console.log(`[Scanner] Saved ${extracted} subtitle file(s) for ${path.basename(filePath)} in ${path.join('Subtitles', formatEpisodeFolder(episodeNumber))}.`);
   }
 }
 
@@ -402,7 +403,7 @@ export async function runScan(): Promise<ScanResult> {
       // Awaited sequentially — on a 2-core/1GB VPS running concurrent ffmpeg
       // processes causes CPU/memory spikes that kill streaming for active users.
       // Already-extracted .vtt files are skipped on subsequent scans.
-      await extractSubtitlesToDisk(filePath).catch((err: any) =>
+      await extractSubtitlesToDisk(filePath, parsed.episode).catch((err: any) =>
         console.error(`[Scanner] Subtitle extraction error for ${filePath}:`, err.message)
       );
     } catch (err: any) {
