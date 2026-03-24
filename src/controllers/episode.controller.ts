@@ -26,6 +26,8 @@ interface AudioTrackPayload {
 const SUBTITLE_EXTENSIONS = ['.vtt', '.srt'];
 let s3Client: S3Client | null = null;
 const STREAM_TICKET_TTL_SECONDS = Math.max(120, env.STREAM_TICKET_TTL_SECONDS);
+const STREAM_RANGE_CHUNK_MB = Number.isFinite(env.STREAM_RANGE_CHUNK_MB) ? env.STREAM_RANGE_CHUNK_MB : 8;
+const STREAM_RANGE_CHUNK_SIZE_BYTES = Math.max(2, Math.min(32, STREAM_RANGE_CHUNK_MB)) * 1024 * 1024;
 
 interface StreamTicketPayload {
   episodeId: string;
@@ -515,7 +517,20 @@ export async function streamEpisode(req: Request, res: Response) {
     if (rangeHeader) {
       const [startStr, endStr] = rangeHeader.replace(/bytes=/, '').split('-');
       const start = parseInt(startStr, 10);
-      const end = endStr ? parseInt(endStr, 10) : Math.min(start + 1024 * 1024 * 2 - 1, fileSize - 1); // 2 MB chunks
+      const end = endStr
+        ? parseInt(endStr, 10)
+        : Math.min(start + STREAM_RANGE_CHUNK_SIZE_BYTES - 1, fileSize - 1);
+
+      if (!Number.isFinite(start) || start < 0 || start >= fileSize) {
+        res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
+        return;
+      }
+
+      if (!Number.isFinite(end) || end < start) {
+        res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
+        return;
+      }
+
       const chunkSize = end - start + 1;
 
       res.writeHead(206, {

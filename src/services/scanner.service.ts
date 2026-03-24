@@ -161,8 +161,8 @@ async function upsertEpisode(
   episodeNumber: number,
   filePath: string,
   bucketName: string
-): Promise<void> {
-  const { error } = await supabase
+): Promise<{ id: string; file_path: string } | null> {
+  const { data, error } = await supabase
     .from('episodes')
     .upsert(
       {
@@ -172,14 +172,19 @@ async function upsertEpisode(
         bucket_name: bucketName,
       },
       { onConflict: 'show_id,episode_number' } // comma-separated column list matching UNIQUE(show_id, episode_number)
-    );
+    )
+    .select('id, file_path')
+    .single();
 
   if (error) {
     console.error(
       `[Scanner] Failed to upsert episode ${episodeNumber} for show ${showId}:`,
       error.message
     );
+    return null;
   }
+
+  return data ?? null;
 }
 
 /** Remove DB episodes whose file paths no longer exist in the scanned set */
@@ -336,11 +341,18 @@ export interface ScanResult {
   inserted: number;
   errors: string[];
   durationMs: number;
+  processedEpisodes: Array<{ id: string; filePath: string }>;
 }
 
 export async function runScan(): Promise<ScanResult> {
   const start = Date.now();
-  const result: ScanResult = { scanned: 0, inserted: 0, errors: [], durationMs: 0 };
+  const result: ScanResult = {
+    scanned: 0,
+    inserted: 0,
+    errors: [],
+    durationMs: 0,
+    processedEpisodes: [],
+  };
   const foundPaths = new Set<string>();
 
   console.log(`[Scanner] Starting scan (mode: ${env.STORAGE_MODE})...`);
@@ -373,12 +385,17 @@ export async function runScan(): Promise<ScanResult> {
 
     try {
       const showId = await getOrCreateShow(parsed.title);
-      await upsertEpisode(
+      const upsertedEpisode = await upsertEpisode(
         showId,
         parsed.episode,
         filePath,
         env.STORAGE_MODE === 's3' ? env.S3_BUCKET_NAME : 'local'
       );
+
+      if (upsertedEpisode?.id) {
+        result.processedEpisodes.push({ id: upsertedEpisode.id, filePath: upsertedEpisode.file_path });
+      }
+
       result.inserted++;
 
       // Extract embedded subtitles to .vtt files next to the video.

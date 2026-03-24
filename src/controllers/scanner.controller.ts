@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { runScan } from '../services/scanner.service.js';
+import { prewarmEpisodeAudioVariants } from '../services/audioPrewarm.service.js';
 import { supabase } from '../config/db.js';
 import { env } from '../config/env.js';
 
@@ -41,6 +42,13 @@ export async function rescanLibrary(req: Request, res: Response) {
 
     // Log scan stats (non-blocking)
     console.log(`[Rescan] Completed. Scanned: ${scanResult.scanned}, Inserted: ${scanResult.inserted}, Errors: ${scanResult.errors.length}, Time: ${scanResult.durationMs}ms`);
+
+    // Warm alternate audio variants in background so first playback is faster.
+    if (env.STORAGE_MODE === 'local' && scanResult.processedEpisodes.length > 0) {
+      void prewarmEpisodeAudioVariants(scanResult.processedEpisodes)
+        .then(() => console.log('[Rescan] Audio prewarm completed.'))
+        .catch((error: any) => console.warn('[Rescan] Audio prewarm failed:', error?.message || error));
+    }
   } catch (err: any) {
     console.error('[Rescan] Error:', err.message);
     res.status(500).json({ error: 'Scan failed.', details: err.message });
