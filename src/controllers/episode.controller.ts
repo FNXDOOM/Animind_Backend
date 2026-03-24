@@ -396,9 +396,6 @@ async function getLocalSubtitleTracks(filePath: string): Promise<SubtitleTrackPa
     });
   }
 
-  const embeddedTracks = await getEmbeddedSubtitleTracks(fullVideoPath);
-  tracks.push(...embeddedTracks);
-
   return tracks;
 }
 
