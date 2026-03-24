@@ -32,55 +32,65 @@ function normalizeForParse(stem: string): string {
     .trim();
 }
 
-function stripLanguageSuffixes(stem: string): string[] {
-  const candidates = new Set<string>([stem]);
+const SUBTITLE_LANGUAGE_TOKEN = '(english|japanese|spanish|eng|jpn|spa|rus|hindi|french|german|arabic|ara|chi|fre|ger|ita|por)';
 
-  const languagePattern = /(english|japanese|spanish|eng|jpn|spa|rus|hindi|french|german|arabic)/i;
-  const suffixPatterns = [
-    /[._ -](english|japanese|spanish|eng|jpn|spa|rus|hindi|french|german|arabic)([._ -]\d+)?$/i,
-    /[._ -]\d+$/,
+function stripKnownSubtitleSuffixes(stem: string): string {
+  let current = stem.trim();
+
+  // Remove language and variant suffixes repeatedly from the tail.
+  for (let i = 0; i < 6; i += 1) {
+    const next = current
+      .replace(new RegExp(`[._ -]${SUBTITLE_LANGUAGE_TOKEN}(?:[._ -]\\d+)?$`, 'i'), '')
+      .replace(/[._ -](sdh|cc|forced)$/i, '')
+      .trim();
+
+    if (next === current || !next) break;
+    current = next;
+  }
+
+  return current;
+}
+
+function extractEpisodeByStrongPatterns(stem: string): number | null {
+  const normalized = normalizeForParse(stem);
+  const patterns = [
+    /\bS\d{1,2}E(\d{1,4})\b/i,
+    /\bE(?:P|pisode)?\s*(\d{1,4})\b/i,
+    /(?:^|\s)-\s*(\d{1,4})(?=\s|$)/,
+    new RegExp(`(?:^|\\s)(\\d{1,4})(?=\\s${SUBTITLE_LANGUAGE_TOKEN}\\b)`, 'i'),
   ];
 
-  let current = stem;
-  for (let i = 0; i < 3; i += 1) {
-    let changed = false;
-    for (const pattern of suffixPatterns) {
-      const next = current.replace(pattern, '').trim();
-      if (next !== current && next.length > 0) {
-        current = next;
-        candidates.add(current);
-        changed = true;
-      }
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (!match) continue;
+
+    const episode = parseInt(match[1], 10);
+    if (Number.isFinite(episode) && episode > 0 && episode <= 5000) {
+      return episode;
     }
-    if (!changed) break;
   }
 
-  const dotParts = stem.split('.');
-  if (dotParts.length > 1) {
-    candidates.add(dotParts.slice(0, -1).join('.'));
-  }
-  if (dotParts.length > 2 && /^\d+$/.test(dotParts[dotParts.length - 1])) {
-    candidates.add(dotParts.slice(0, -2).join('.'));
-  }
-
-  if (languagePattern.test(stem)) {
-    candidates.add(stem.replace(languagePattern, '').replace(/[._ -]{2,}/g, ' ').trim());
-  }
-
-  return Array.from(candidates)
-    .map(normalizeForParse)
-    .filter(Boolean);
+  return null;
 }
 
 function deriveEpisodeFromSubtitleName(fileName: string): number | null {
   const stem = path.parse(fileName).name;
-  const parseCandidates = stripLanguageSuffixes(stem);
 
-  for (const candidate of parseCandidates) {
-    const parsed = parseAnimeFilename(candidate);
-    if (parsed?.episode && Number.isFinite(parsed.episode)) {
-      return parsed.episode;
-    }
+  const strongEpisode = extractEpisodeByStrongPatterns(stem);
+  if (strongEpisode) {
+    return strongEpisode;
+  }
+
+  const stripped = stripKnownSubtitleSuffixes(stem);
+  const strippedEpisode = extractEpisodeByStrongPatterns(stripped);
+  if (strippedEpisode) {
+    return strippedEpisode;
+  }
+
+  // Conservative fallback after suffix stripping only.
+  const parsed = parseAnimeFilename(normalizeForParse(stripped));
+  if (parsed?.episode && Number.isFinite(parsed.episode) && parsed.episode > 0) {
+    return parsed.episode;
   }
 
   return null;
