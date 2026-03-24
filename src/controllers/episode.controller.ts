@@ -373,8 +373,17 @@ async function getLocalSubtitleTracks(filePath: string): Promise<SubtitleTrackPa
     return [];
   }
 
-  const pattern = new RegExp(`^${escapeRegex(baseName)}([._ -].+)?\\.(vtt|srt)$`, 'i');
-  const subtitleFiles = entries.filter(name => pattern.test(name));
+  // Match sidecar subtitle files that start with the video base name.
+  // Use a simple startsWith check instead of regex to avoid escaping issues
+  // with special characters in filenames like 'Frieren - 01' (hyphens, spaces).
+  const baseNameLower = baseName.toLowerCase();
+  const subtitleFiles = entries.filter(name => {
+    const nameLower = name.toLowerCase();
+    if (!nameLower.startsWith(baseNameLower)) return false;
+    const rest = nameLower.slice(baseNameLower.length);
+    // Must have a separator then extension — e.g. '.English.vtt' or '.en.srt'
+    return /^[._ -].+\.(vtt|srt)$/.test(rest);
+  });
 
   const tracks: SubtitleTrackPayload[] = [];
   for (const subtitleFile of subtitleFiles) {
