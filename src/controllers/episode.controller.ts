@@ -28,6 +28,12 @@ let s3Client: S3Client | null = null;
 const STREAM_TICKET_TTL_SECONDS = Math.max(120, env.STREAM_TICKET_TTL_SECONDS);
 const STREAM_RANGE_CHUNK_MB = Number.isFinite(env.STREAM_RANGE_CHUNK_MB) ? env.STREAM_RANGE_CHUNK_MB : 8;
 const STREAM_RANGE_CHUNK_SIZE_BYTES = Math.max(2, Math.min(32, STREAM_RANGE_CHUNK_MB)) * 1024 * 1024;
+const MOBILE_COMPAT_UNSUPPORTED_EXTENSIONS = new Set(
+  (env.MOBILE_COMPAT_UNSUPPORTED_EXTENSIONS ?? ['mkv', 'avi'])
+    .map(ext => ext.trim().toLowerCase())
+    .filter(Boolean)
+);
+const mobileCompatVariantJobs = new Map<string, Promise<string>>();
 
 interface StreamTicketPayload {
   episodeId: string;
@@ -48,6 +54,20 @@ function signTicketPart(payloadPart: string): string {
     .createHmac('sha256', env.SUPABASE_SERVICE_ROLE_KEY)
     .update(payloadPart)
     .digest('base64url');
+}
+
+function parseBooleanQuery(value?: string): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function getFileExtension(filePath: string): string {
+  return path.extname(filePath).replace('.', '').toLowerCase();
+}
+
+function requiresMobileCompatVariant(filePath: string): boolean {
+  return MOBILE_COMPAT_UNSUPPORTED_EXTENSIONS.has(getFileExtension(filePath));
 }
 
 function createStreamTicket(episodeId: string, audioTrackIndex?: number): string {
@@ -242,6 +262,76 @@ async function getOrCreateAudioVariant(
   }
 
   return outputPath;
+}
+
+async function getOrCreateMobileCompatVariant(sourcePath: string, episodeId: string): Promise<string> {
+  const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
+  const sourceStat = await stat(sourcePath);
+  const sourceSignature = `${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}`;
+  const variantHash = crypto.createHash('sha1').update(sourceSignature).digest('hex').slice(0, 12);
+  const cacheDir = path.resolve(env.LOCAL_STORAGE_PATH, '.animind-audio-cache');
+  const outputPath = path.join(cacheDir, `${episodeId}-mobile-${variantHash}.mp4`);
+
+  await mkdir(cacheDir, { recursive: true });
+
+  try {
+    const cached = await stat(outputPath);
+    if (cached.size > 0) {
+      return outputPath;
+    }
+  } catch {
+    // Cache miss; build below.
+  }
+
+  const inFlight = mobileCompatVariantJobs.get(outputPath);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const buildJob = (async () => {
+    // Use first video and first audio stream so default playback stays compatible on mobile.
+    let result = await runProcess(ffmpegBin, [
+      '-y',
+      '-v', 'error',
+      '-i', sourcePath,
+      '-map', '0:v:0',
+      '-map', '0:a:0',
+      '-c:v', 'copy',
+      '-c:a', 'copy',
+      '-movflags', '+faststart',
+      outputPath,
+    ]).catch(() => null);
+
+    if (!result || result.code !== 0) {
+      result = await runProcess(ffmpegBin, [
+        '-y',
+        '-v', 'error',
+        '-i', sourcePath,
+        '-map', '0:v:0',
+        '-map', '0:a:0',
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-movflags', '+faststart',
+        outputPath,
+      ]).catch(() => null);
+    }
+
+    if (!result || result.code !== 0) {
+      const stderr = result?.stderr?.trim() || 'ffmpeg mobile compatibility remux failed';
+      throw new Error(stderr);
+    }
+
+    return outputPath;
+  })();
+
+  mobileCompatVariantJobs.set(outputPath, buildJob);
+
+  try {
+    return await buildJob;
+  } finally {
+    mobileCompatVariantJobs.delete(outputPath);
+  }
 }
 
 async function getEmbeddedSubtitleTracks(fullVideoPath: string): Promise<SubtitleTrackPayload[]> {
@@ -505,10 +595,12 @@ async function getS3SubtitleTracks(filePath: string, bucketName: string): Promis
 export async function streamEpisode(req: Request, res: Response) {
   const { id } = req.params;
   const audioTrackParam = typeof req.query.at === 'string' ? req.query.at : undefined;
+  const mobileCompatParam = typeof req.query.mc === 'string' ? req.query.mc : undefined;
   const selectedAudioTrackIndex =
     typeof audioTrackParam === 'string' && /^\d+$/.test(audioTrackParam)
       ? parseInt(audioTrackParam, 10)
       : null;
+  const mobileCompatRequested = parseBooleanQuery(mobileCompatParam);
 
   const streamTicket = typeof req.query.st === 'string' ? req.query.st : undefined;
   const hasValidBearer = await verifyBearerAuth(req.headers.authorization);
@@ -548,13 +640,27 @@ export async function streamEpisode(req: Request, res: Response) {
 
     // ── Local: HTTP Range-Request streaming ──────────────────────────────────
     let filePath = streamInfo.url;
+    let usingMp4Variant = false;
+
     if (selectedAudioTrackIndex !== null) {
       try {
         filePath = await getOrCreateAudioVariant(filePath, id, selectedAudioTrackIndex);
+        usingMp4Variant = true;
       } catch (variantError: any) {
         console.error('[Stream][AudioVariant] Error:', variantError?.message || variantError);
         res.status(400).json({ error: 'Selected audio track is unavailable for this episode.' });
         return;
+      }
+    } else if (
+      env.MOBILE_COMPAT_FALLBACK_ENABLED
+      && mobileCompatRequested
+      && requiresMobileCompatVariant(episode.file_path)
+    ) {
+      try {
+        filePath = await getOrCreateMobileCompatVariant(filePath, id);
+        usingMp4Variant = true;
+      } catch (variantError: any) {
+        console.warn('[Stream][MobileCompat] Falling back to source stream:', variantError?.message || variantError);
       }
     }
 
@@ -568,7 +674,7 @@ export async function streamEpisode(req: Request, res: Response) {
     }
 
     const rangeHeader = req.headers.range;
-    const mimeType = selectedAudioTrackIndex !== null ? 'video/mp4' : getMimeType(episode.file_path);
+    const mimeType = usingMp4Variant ? 'video/mp4' : getMimeType(episode.file_path);
 
     if (rangeHeader) {
       const [startStr, endStr] = rangeHeader.replace(/bytes=/, '').split('-');
@@ -618,10 +724,12 @@ export async function streamEpisode(req: Request, res: Response) {
 export async function getEpisodeStreamTicket(req: Request, res: Response) {
   const { id } = req.params;
   const audioTrackParam = typeof req.query.at === 'string' ? req.query.at : undefined;
+  const mobileCompatParam = typeof req.query.mc === 'string' ? req.query.mc : undefined;
   const selectedAudioTrackIndex =
     typeof audioTrackParam === 'string' && /^\d+$/.test(audioTrackParam)
       ? parseInt(audioTrackParam, 10)
       : undefined;
+  const mobileCompatRequested = parseBooleanQuery(mobileCompatParam);
 
   const { data: episode, error } = await supabase
     .from('episodes')
@@ -635,9 +743,15 @@ export async function getEpisodeStreamTicket(req: Request, res: Response) {
   }
 
   const ticket = createStreamTicket(id, selectedAudioTrackIndex);
-  const audioQuery = typeof selectedAudioTrackIndex === 'number' ? `&at=${selectedAudioTrackIndex}` : '';
+  const query = new URLSearchParams({ st: ticket });
+  if (typeof selectedAudioTrackIndex === 'number') {
+    query.set('at', String(selectedAudioTrackIndex));
+  }
+  if (mobileCompatRequested) {
+    query.set('mc', '1');
+  }
   res.json({
-    url: `/api/episodes/${encodeURIComponent(id)}/stream?st=${encodeURIComponent(ticket)}${audioQuery}`,
+    url: `/api/episodes/${encodeURIComponent(id)}/stream?${query.toString()}`,
     expiresIn: STREAM_TICKET_TTL_SECONDS,
   });
 }
