@@ -26,6 +26,7 @@ export const env = {
   S3_SECRET_ACCESS_KEY: process.env.S3_SECRET_ACCESS_KEY ?? '',
   S3_PRESIGN_EXPIRES: parseInt(process.env.S3_PRESIGN_EXPIRES ?? '14400', 10),
   STREAM_TICKET_TTL_SECONDS: parseInt(process.env.STREAM_TICKET_TTL_SECONDS ?? '14400', 10),
+  STREAM_RANGE_CHUNK_MB: parseInt(process.env.STREAM_RANGE_CHUNK_MB ?? '8', 10),
 
   // Local
   LOCAL_STORAGE_PATH: process.env.LOCAL_STORAGE_PATH ?? '/mnt/anime',
@@ -35,6 +36,9 @@ export const env = {
   VIDEO_EXTENSIONS: (process.env.VIDEO_EXTENSIONS ?? 'mkv,mp4,avi,webm,m4v')
     .split(',')
     .map(e => e.trim().toLowerCase()),
+  POST_SCAN_AUDIO_PREWARM_ENABLED: process.env.POST_SCAN_AUDIO_PREWARM_ENABLED !== 'false',
+  POST_SCAN_AUDIO_PREWARM_EPISODE_LIMIT: parseInt(process.env.POST_SCAN_AUDIO_PREWARM_EPISODE_LIMIT ?? '12', 10),
+  POST_SCAN_AUDIO_PREWARM_MAX_TRACKS_PER_EPISODE: parseInt(process.env.POST_SCAN_AUDIO_PREWARM_MAX_TRACKS_PER_EPISODE ?? '1', 10),
 
   // AniList
   ANILIST_ENABLED: process.env.ANILIST_ENABLED !== 'false',
