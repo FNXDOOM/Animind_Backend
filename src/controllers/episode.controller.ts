@@ -21,9 +21,12 @@ interface AudioTrackPayload {
   label: string;
   language: string;
   streamIndex: number;
+  codec?: string;
+  browserSupported?: boolean;
 }
 
 const SUBTITLE_EXTENSIONS = ['.vtt', '.srt'];
+const BROWSER_SAFE_AUDIO_CODECS = new Set(['aac', 'mp3', 'opus', 'vorbis']);
 let s3Client: S3Client | null = null;
 const STREAM_TICKET_TTL_SECONDS = Math.max(120, env.STREAM_TICKET_TTL_SECONDS);
 const STREAM_RANGE_CHUNK_MB = Number.isFinite(env.STREAM_RANGE_CHUNK_MB) ? env.STREAM_RANGE_CHUNK_MB : 8;
@@ -152,6 +155,16 @@ function normalizeLanguage(raw?: string): string {
   return raw;
 }
 
+function normalizeAudioCodec(raw?: string): string {
+  return String(raw ?? '').toLowerCase().trim();
+}
+
+function isBrowserSafeAudioCodec(codec?: string): boolean {
+  const normalized = normalizeAudioCodec(codec);
+  if (!normalized) return false;
+  return normalized === 'mp4a' || normalized.startsWith('aac') || BROWSER_SAFE_AUDIO_CODECS.has(normalized);
+}
+
 function formatEpisodeFolderName(episodeNumber: number): string {
   const width = episodeNumber >= 100 ? 3 : 2;
   return `Episode ${String(episodeNumber).padStart(width, '0')}`;
@@ -189,14 +202,42 @@ async function runProcess(command: string, args: string[]): Promise<{ code: numb
   });
 }
 
+async function getAudioStreamCodec(fullVideoPath: string, streamIndex: number): Promise<string | null> {
+  const ffprobeBin = process.env.FFPROBE_PATH || 'ffprobe';
+  const probeResult = await runProcess(ffprobeBin, [
+    '-v', 'error',
+    '-print_format', 'json',
+    '-show_streams',
+    '-select_streams', 'a',
+    fullVideoPath,
+  ]).catch(() => null);
+
+  if (!probeResult || probeResult.code !== 0 || !probeResult.stdout.trim()) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(probeResult.stdout) as {
+      streams?: Array<{ index?: number; codec_name?: string }>;
+    };
+    const stream = (parsed.streams ?? []).find(item => item?.index === streamIndex);
+    return stream?.codec_name ? String(stream.codec_name).toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getOrCreateAudioVariant(
   sourcePath: string,
   episodeId: string,
   audioTrackIndex: number
 ): Promise<string> {
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
+  const codec = await getAudioStreamCodec(sourcePath, audioTrackIndex).catch(() => null);
+  const preferCopyAudio = isBrowserSafeAudioCodec(codec ?? undefined);
+
   const sourceStat = await stat(sourcePath);
-  const sourceSignature = `${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}`;
+  const sourceSignature = `${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}:${audioTrackIndex}:${preferCopyAudio ? 'copy' : 'aac'}`;
   const variantHash = crypto.createHash('sha1').update(sourceSignature).digest('hex').slice(0, 12);
   const cacheDir = path.resolve(env.LOCAL_STORAGE_PATH, '.animind-audio-cache');
   const outputPath = path.join(cacheDir, `${episodeId}-a${audioTrackIndex}-${variantHash}.mp4`);
@@ -212,18 +253,22 @@ async function getOrCreateAudioVariant(
     // Cache miss; build below.
   }
 
-  // First attempt: copy both tracks as-is for speed and quality.
-  let result = await runProcess(ffmpegBin, [
-    '-y',
-    '-v', 'error',
-    '-i', sourcePath,
-    '-map', '0:v:0',
-    '-map', `0:${audioTrackIndex}`,
-    '-c:v', 'copy',
-    '-c:a', 'copy',
-    '-movflags', '+faststart',
-    outputPath,
-  ]).catch(() => null);
+  let result: { code: number; stdout: string; stderr: string } | null = null;
+
+  // Copy audio only when codec is known browser-safe; otherwise transcode directly to AAC.
+  if (preferCopyAudio) {
+    result = await runProcess(ffmpegBin, [
+      '-y',
+      '-v', 'error',
+      '-i', sourcePath,
+      '-map', '0:v:0',
+      '-map', `0:${audioTrackIndex}`,
+      '-c:v', 'copy',
+      '-c:a', 'copy',
+      '-movflags', '+faststart',
+      outputPath,
+    ]).catch(() => null);
+  }
 
   // Fallback: transcode audio if container/codec copy is incompatible.
   if (!result || result.code !== 0) {
@@ -366,6 +411,7 @@ async function getEmbeddedAudioTracks(fullVideoPath: string): Promise<AudioTrack
     const language = normalizeLanguage(stream?.tags?.language);
     const title = stream?.tags?.title ? String(stream.tags.title) : '';
     const codec = stream?.codec_name ? String(stream.codec_name).toUpperCase() : '';
+    const codecNormalized = stream?.codec_name ? String(stream.codec_name).toLowerCase() : '';
     const channels = typeof stream?.channels === 'number' ? `${stream.channels}ch` : '';
     const metadataBits = [codec, channels].filter(Boolean).join(' / ');
     const labelBase = title || `${language} Track ${order}`;
@@ -378,6 +424,8 @@ async function getEmbeddedAudioTracks(fullVideoPath: string): Promise<AudioTrack
       label,
       language,
       streamIndex: stream.index,
+      codec: codecNormalized || undefined,
+      browserSupported: isBrowserSafeAudioCodec(codecNormalized),
     });
 
     order += 1;
