@@ -83,6 +83,34 @@ async function listLocalFiles(dir: string, base = dir): Promise<string[]> {
 
 // ── DB Operations ────────────────────────────────────────────────────────────
 
+function normalizeTitleForLookup(title: string): string {
+  return title
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function scoreShowCandidate(row: {
+  anilist_id?: number | null;
+  cover_image_url?: string | null;
+  synopsis?: string | null;
+  title?: string | null;
+}, parsedTitle: string): number {
+  let score = 0;
+  if (row.anilist_id !== null && row.anilist_id !== undefined) score += 8;
+  if (row.cover_image_url) score += 3;
+  if (row.synopsis) score += 2;
+
+  const rowTitle = normalizeTitleForLookup(row.title ?? '');
+  const target = normalizeTitleForLookup(parsedTitle);
+  if (rowTitle === target) score += 6;
+  else if (rowTitle.includes(target) || target.includes(rowTitle)) score += 3;
+
+  return score;
+}
+
 async function getOrCreateShow(title: string): Promise<string> {
   const trimmed = title.trim();
 
@@ -99,6 +127,18 @@ async function getOrCreateShow(title: string): Promise<string> {
   const meta = await fetchAniListMeta(trimmed);
   const canonicalTitle = meta?.title?.english ?? meta?.title?.romaji ?? trimmed;
 
+  // 2a. Strong identity match by AniList id when available.
+  if (meta?.id) {
+    const { data: byAniList } = await supabase
+      .from('shows')
+      .select('id')
+      .eq('anilist_id', meta.id)
+      .limit(1)
+      .maybeSingle();
+
+    if (byAniList?.id) return byAniList.id;
+  }
+
   // 3. If the canonical title differs from the parsed title, check again.
   //    e.g. file "Frieren Beyond Journey's End" → AniList → "Frieren: Beyond Journey's End"
   //    The second show row already exists under the canonical title, so we find it here
@@ -111,6 +151,23 @@ async function getOrCreateShow(title: string): Promise<string> {
       .maybeSingle();
 
     if (byCanonical?.id) return byCanonical.id;
+  }
+
+  // 3b. If AniList is unavailable or title mismatch remains, use a conservative
+  // fuzzy fallback to avoid creating plain-title duplicates for canonical rows.
+  if (!meta) {
+    const fuzzySearch = `%${trimmed.replace(/\s+/g, '%')}%`;
+    const { data: fuzzyMatches } = await supabase
+      .from('shows')
+      .select('id, title, anilist_id, cover_image_url, synopsis')
+      .ilike('title', fuzzySearch)
+      .limit(8);
+
+    if (fuzzyMatches?.length) {
+      const best = [...fuzzyMatches]
+        .sort((a, b) => scoreShowCandidate(b, trimmed) - scoreShowCandidate(a, trimmed))[0];
+      if (best?.id) return best.id;
+    }
   }
 
   const showPayload = {
