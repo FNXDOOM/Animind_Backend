@@ -32,19 +32,78 @@ interface Room {
 const rooms = new Map<string, Room>();
 const userDisplayNameCache = new Map<string, string>();
 const SYNCPLAY_SOCKET_PATH = '/api/socket.io';
+let hasWarnedMissingEndedAtColumn = false;
 
-async function closeStaleActiveWatchParties(): Promise<void> {
+function isMissingEndedAtColumnError(message: string): boolean {
+  return /ended_at/i.test(message) && /(column|schema cache|does not exist)/i.test(message);
+}
+
+async function markWatchPartyEndedByCode(roomCode: string): Promise<void> {
+  const endedAt = new Date().toISOString();
   const { error } = await supabase
     .from('watch_parties')
-    .update({ status: 'ended' })
+    .update({ status: 'ended', ended_at: endedAt })
+    .eq('id', roomCode);
+
+  if (!error) return;
+
+  if (isMissingEndedAtColumnError(error.message)) {
+    if (!hasWarnedMissingEndedAtColumn) {
+      hasWarnedMissingEndedAtColumn = true;
+      console.warn('[SyncPlay] watch_parties.ended_at is missing. Run the SyncPlay TTL migration to enable 1-hour auto cleanup.');
+    }
+
+    const { error: fallbackError } = await supabase
+      .from('watch_parties')
+      .update({ status: 'ended' })
+      .eq('id', roomCode);
+
+    if (fallbackError) {
+      console.warn(`[SyncPlay] Failed to mark room ${roomCode} as ended:`, fallbackError.message);
+    }
+
+    return;
+  }
+
+  console.warn(`[SyncPlay] Failed to mark room ${roomCode} as ended:`, error.message);
+}
+
+async function closeStaleActiveWatchParties(): Promise<void> {
+  const endedAt = new Date().toISOString();
+  const { error } = await supabase
+    .from('watch_parties')
+    .update({ status: 'ended', ended_at: endedAt })
     .eq('status', 'active');
+
+  if (!error) {
+    console.log('[SyncPlay] Closed stale active watch parties from previous server sessions.');
+    return;
+  }
+
+  if (isMissingEndedAtColumnError(error.message)) {
+    if (!hasWarnedMissingEndedAtColumn) {
+      hasWarnedMissingEndedAtColumn = true;
+      console.warn('[SyncPlay] watch_parties.ended_at is missing. Run the SyncPlay TTL migration to enable 1-hour auto cleanup.');
+    }
+
+    const { error: fallbackError } = await supabase
+      .from('watch_parties')
+      .update({ status: 'ended' })
+      .eq('status', 'active');
+
+    if (fallbackError) {
+      console.warn('[SyncPlay] Failed to close stale active watch parties:', fallbackError.message);
+      return;
+    }
+
+    console.log('[SyncPlay] Closed stale active watch parties from previous server sessions.');
+    return;
+  }
 
   if (error) {
     console.warn('[SyncPlay] Failed to close stale active watch parties:', error.message);
     return;
   }
-
-  console.log('[SyncPlay] Closed stale active watch parties from previous server sessions.');
 }
 
 function generateRoomCode(): string {
@@ -412,10 +471,7 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
         // Clean up empty room — clear all remaining timers first
         room.bufferingTimers.forEach(t => clearTimeout(t));
         rooms.delete(code);
-        const { error } = await supabase.from('watch_parties').update({ status: 'ended' }).eq('id', code);
-        if (error) {
-          console.warn(`[SyncPlay] Failed to mark room ${code} as ended:`, error.message);
-        }
+        await markWatchPartyEndedByCode(code);
         console.log(`[SyncPlay] Room ${code} closed (all left).`);
       } else {
         // If host left, promote next participant

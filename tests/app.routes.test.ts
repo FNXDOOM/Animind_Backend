@@ -23,6 +23,9 @@ const controllerMocks = vi.hoisted(() => ({
   getEpisodeSubtitles: vi.fn((_req, res) => {
     res.status(200).json({ tracks: [{ id: 'en' }] });
   }),
+  getEpisodeAudioTracks: vi.fn((_req, res) => {
+    res.status(200).json({ tracks: [] });
+  }),
   deleteMyAccount: vi.fn((_req, res) => {
     res.status(204).send();
   }),
@@ -54,6 +57,7 @@ vi.mock('../src/controllers/episode.controller.js', () => ({
   streamEpisode: controllerMocks.streamEpisode,
   getEpisodeStreamTicket: controllerMocks.getEpisodeStreamTicket,
   getEpisodeSubtitles: controllerMocks.getEpisodeSubtitles,
+  getEpisodeAudioTracks: controllerMocks.getEpisodeAudioTracks,
 }));
 
 vi.mock('../src/controllers/account.controller.js', () => ({
