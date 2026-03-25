@@ -11,6 +11,7 @@
 export interface ParsedAnime {
   title: string;
   episode: number;
+  season?: number;
   quality?: string;
   group?: string;
 }
@@ -38,14 +39,18 @@ function stripTrailingNoise(name: string): string {
 }
 
 // Try to extract episode number in patterns like: "- 01", "E01", "Episode 01", " 01 "
-function extractEpisode(name: string): { title: string; episode: number } | null {
+function extractEpisode(name: string): { title: string; episode: number; season?: number } | null {
   // Pattern: "Title - 01" or "Title – 01"
   let m = name.match(/^(.+?)\s*[-–]\s*(\d{1,4})\s*$/);
   if (m) return { title: m[1].trim(), episode: parseInt(m[2], 10) };
 
-  // Pattern: SxxExx
-  m = name.match(/^(.+?)\s*[Ss]\d{1,2}[Ee](\d{1,4})\b/i);
-  if (m) return { title: m[1].trim(), episode: parseInt(m[2], 10) };
+  // Pattern: bare SxxExx or SxxExxvN (filename without title)
+  m = name.match(/^[Ss](\d{1,2})[Ee](\d{1,4})(?:[Vv]\d+)?$/i);
+  if (m) return { title: '', season: parseInt(m[1], 10), episode: parseInt(m[2], 10) };
+
+  // Pattern: SxxExx and SxxExxvN (e.g. S03E01v3)
+  m = name.match(/^(.+?)\s*(?:[-–]\s*)?[Ss](\d{1,2})[Ee](\d{1,4})(?:[Vv]\d+)?\b/i);
+  if (m) return { title: m[1].trim(), season: parseInt(m[2], 10), episode: parseInt(m[3], 10) };
 
   // Pattern: "Episode 01" / "Ep01"
   m = name.match(/^(.+?)\s*[Ee]p(?:isode)?\s*(\d{1,4})\s*$/);
@@ -56,6 +61,31 @@ function extractEpisode(name: string): { title: string; episode: number } | null
   if (m) return { title: m[1].trim(), episode: parseInt(m[2], 10) };
 
   return null;
+}
+
+function extractSeasonFromPathParts(parts: string[]): number | undefined {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i]?.trim();
+    if (!part) continue;
+
+    let match = part.match(/^season\s*(\d{1,2})$/i);
+    if (match) return parseInt(match[1], 10);
+
+    match = part.match(/\bseason\s*(\d{1,2})\b/i);
+    if (match) return parseInt(match[1], 10);
+
+    match = part.match(/^s(\d{1,2})$/i);
+    if (match) return parseInt(match[1], 10);
+  }
+
+  return undefined;
+}
+
+function stripSeasonSuffix(title: string): string {
+  return title
+    .replace(/\s*[-–]\s*season\s*\d{1,2}\s*$/i, '')
+    .replace(/\s*season\s*\d{1,2}\s*$/i, '')
+    .trim();
 }
 
 export function parseAnimeFilename(filename: string): ParsedAnime | null {
@@ -74,6 +104,7 @@ export function parseAnimeFilename(filename: string): ParsedAnime | null {
     return {
       title: parsed.title,
       episode: parsed.episode,
+      season: parsed.season,
       quality,
       group,
     };
@@ -93,13 +124,20 @@ export function parseFolderPath(relativePath: string): ParsedAnime | null {
   const parts = relativePath.replace(/\\/g, '/').split('/');
   const filename = parts[parts.length - 1];
   const folderTitle = parts.length > 1 ? parts[0] : null;
+  const seasonFromPath = extractSeasonFromPathParts(parts.slice(0, -1));
 
   const parsed = parseAnimeFilename(filename);
   if (!parsed) return null;
 
+  if (!parsed.season && seasonFromPath) {
+    parsed.season = seasonFromPath;
+  }
+
   // Prefer folder name as title if it looks meaningful
   if (folderTitle && folderTitle.length > 1 && !/^season/i.test(folderTitle)) {
-    parsed.title = folderTitle.trim();
+    parsed.title = stripSeasonSuffix(folderTitle.trim()) || folderTitle.trim();
+  } else if (!parsed.title) {
+    return null;
   }
 
   return parsed;

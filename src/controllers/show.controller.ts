@@ -28,12 +28,13 @@ export async function getShows(req: Request, res: Response) {
 }
 
 /** GET /api/shows/:id
- * Returns a show + its episodes ordered by episode_number.
+ * Returns a show + its episodes ordered by season_number then episode_number.
  *
- * FIX: deduplicate episodes by episode_number before sending the response.
+ * FIX: deduplicate episodes by (season_number, episode_number) before sending the response.
  * If the scanner created duplicate rows (e.g. due to the broken upsert conflict
  * key), the API would return the same episode dozens of times.  We keep only
- * the first occurrence of each episode_number so the frontend sidebar always
+ * the first occurrence of each (season_number, episode_number) pair so the
+ * frontend sidebar always
  * shows a clean list, even before the DB duplicates are pruned by the scanner.
  */
 export async function getShowById(req: Request, res: Response) {
@@ -55,8 +56,9 @@ export async function getShowById(req: Request, res: Response) {
   // 1000 rows, which would silently truncate shows with many episodes.
   const { data: episodesRaw, error: epError } = await supabase
     .from('episodes')
-    .select('id, episode_number, title, duration, created_at')
+    .select('id, season_number, episode_number, title, duration, created_at')
     .eq('show_id', id)
+    .order('season_number', { ascending: true })
     .order('episode_number', { ascending: true })
     .limit(10000);
 
@@ -78,17 +80,31 @@ export async function getShowById(req: Request, res: Response) {
     return Number.isInteger(n) || Math.trunc(n) === n ? Math.trunc(n) : n;
   };
 
-  const seen = new Set<number | null>();
+  const normalizeSeason = (n: number | null): number => {
+    if (n === null || n === undefined || !Number.isFinite(n)) return 1;
+    return Math.max(1, Math.trunc(n));
+  };
+
+  const seen = new Set<string>();
   const episodes = (episodesRaw ?? [])
-    .map(ep => ({ ...ep, episode_number: normalise(ep.episode_number) }))
+    .map(ep => ({
+      ...ep,
+      season_number: normalizeSeason(ep.season_number),
+      episode_number: normalise(ep.episode_number),
+    }))
     .filter(ep => {
       // Skip rows with no episode number rather than merging them all at 0
       if (ep.episode_number === null) return false;
-      if (seen.has(ep.episode_number)) return false;
-      seen.add(ep.episode_number);
+      const key = `${ep.season_number}:${ep.episode_number}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     })
-    .sort((a, b) => (a.episode_number ?? 0) - (b.episode_number ?? 0));
+    .sort((a, b) => {
+      const seasonDiff = (a.season_number ?? 1) - (b.season_number ?? 1);
+      if (seasonDiff !== 0) return seasonDiff;
+      return (a.episode_number ?? 0) - (b.episode_number ?? 0);
+    });
 
   res.json({ ...show, episodes });
 }

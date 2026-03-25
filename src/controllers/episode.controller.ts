@@ -157,6 +157,11 @@ function formatEpisodeFolderName(episodeNumber: number): string {
   return `Episode ${String(episodeNumber).padStart(width, '0')}`;
 }
 
+function formatSeasonFolderName(seasonNumber: number): string {
+  const width = seasonNumber >= 100 ? 3 : 2;
+  return `Season ${String(seasonNumber).padStart(width, '0')}`;
+}
+
 function getShowRootDirFromEpisodePath(filePath: string): string {
   const normalized = filePath.replace(/\\/g, '/');
   const [showFolder] = normalized.split('/');
@@ -381,7 +386,11 @@ async function getEmbeddedAudioTracks(fullVideoPath: string): Promise<AudioTrack
   return tracks;
 }
 
-async function getLocalSubtitleTracks(filePath: string, episodeNumber?: number): Promise<SubtitleTrackPayload[]> {
+async function getLocalSubtitleTracks(
+  filePath: string,
+  episodeNumber?: number,
+  seasonNumber?: number
+): Promise<SubtitleTrackPayload[]> {
   const fullVideoPath = path.resolve(env.LOCAL_STORAGE_PATH, filePath);
   const dir = path.dirname(fullVideoPath);
   const baseName = path.parse(fullVideoPath).name;
@@ -415,6 +424,34 @@ async function getLocalSubtitleTracks(filePath: string, episodeNumber?: number):
 
   if (typeof episodeNumber === 'number' && episodeNumber > 0) {
     const subtitlesRoot = path.join(getShowRootDirFromEpisodePath(filePath), 'Subtitles');
+    const normalizedSeason = typeof seasonNumber === 'number' && seasonNumber > 1
+      ? Math.floor(seasonNumber)
+      : 1;
+
+    if (normalizedSeason > 1) {
+      const seasonEpisodeDir = path.join(
+        subtitlesRoot,
+        formatSeasonFolderName(normalizedSeason),
+        formatEpisodeFolderName(episodeNumber)
+      );
+      const seasonTracks = await loadSubtitleFilesFromDirectory(seasonEpisodeDir);
+      if (seasonTracks.length > 0) {
+        return seasonTracks;
+      }
+
+      const seasonEpisodeFallbackDir = path.join(
+        subtitlesRoot,
+        `Season ${normalizedSeason}`,
+        `Episode ${episodeNumber}`
+      );
+      if (seasonEpisodeFallbackDir !== seasonEpisodeDir) {
+        const seasonFallbackTracks = await loadSubtitleFilesFromDirectory(seasonEpisodeFallbackDir);
+        if (seasonFallbackTracks.length > 0) {
+          return seasonFallbackTracks;
+        }
+      }
+    }
+
     const preferredEpisodeDir = path.join(subtitlesRoot, formatEpisodeFolderName(episodeNumber));
     const fallbackEpisodeDir = path.join(subtitlesRoot, `Episode ${episodeNumber}`);
 
@@ -522,7 +559,7 @@ export async function streamEpisode(req: Request, res: Response) {
   // 1. Fetch episode record
   const { data: episode, error } = await supabase
     .from('episodes')
-    .select('id, file_path, bucket_name, episode_number')
+    .select('id, file_path, bucket_name, episode_number, season_number')
     .eq('id', id)
     .single();
 
@@ -651,7 +688,7 @@ export async function getEpisodeSubtitles(req: Request, res: Response) {
 
   const { data: episode, error } = await supabase
     .from('episodes')
-    .select('id, file_path, bucket_name, episode_number')
+    .select('id, file_path, bucket_name, episode_number, season_number')
     .eq('id', id)
     .single();
 
@@ -666,7 +703,7 @@ export async function getEpisodeSubtitles(req: Request, res: Response) {
     // instant load after the first scan, no ffprobe needed at play time.
     const tracks = env.STORAGE_MODE === 's3'
       ? await getS3SubtitleTracks(episode.file_path, episode.bucket_name)
-      : await getLocalSubtitleTracks(episode.file_path, episode.episode_number);
+      : await getLocalSubtitleTracks(episode.file_path, episode.episode_number, episode.season_number);
 
     res.json({ tracks });
   } catch (err: any) {
