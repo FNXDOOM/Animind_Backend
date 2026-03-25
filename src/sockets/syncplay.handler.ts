@@ -24,6 +24,7 @@ interface Room {
   displayNames: Map<string, string>;   // userId  → displayName
   currentTime: number;
   isPlaying: boolean;
+  wasPlayingBeforeBuffering: boolean;  // saved state to restore after buffering
   buffering: Set<string>;              // socketIds currently buffering
   bufferingTimers: Map<string, ReturnType<typeof setTimeout>>; // socketId → force-resume timer
 }
@@ -206,6 +207,7 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
         displayNames: new Map([[userId, hostDisplayName]]),
         currentTime: 0,
         isPlaying: false,
+        wasPlayingBeforeBuffering: false,
         buffering: new Set(),
         bufferingTimers: new Map(),
       };
@@ -334,7 +336,14 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
 
       // Idempotent — ignore if already registered as buffering
       if (room.buffering.has(socket.id)) return;
+
+      // Save the current play state BEFORE pausing so we can restore it
+      // when all peers finish buffering. Only save on first buffering peer.
+      if (room.buffering.size === 0) {
+        room.wasPlayingBeforeBuffering = room.isPlaying;
+      }
       room.buffering.add(socket.id);
+      room.isPlaying = false;
 
       const displayName = await getUserDisplayName(userId);
 
@@ -349,7 +358,8 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
         room.bufferingTimers.delete(socket.id);
         const dn = await getUserDisplayName(userId);
         io.to(code).emit('peerReady', { userId, displayName: dn, timedOut: true });
-        if (room.buffering.size === 0 && room.isPlaying) {
+        if (room.buffering.size === 0 && room.wasPlayingBeforeBuffering) {
+          room.isPlaying = true;
           io.to(code).emit('play', { currentTime: room.currentTime, fromUserId: 'system', sentAt: Date.now() });
         }
       }, 30_000);
@@ -373,8 +383,10 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       const displayName = await getUserDisplayName(userId);
       io.to(code).emit('peerReady', { userId, displayName });
 
-      // Resume only when ALL peers are ready
-      if (room.buffering.size === 0 && room.isPlaying) {
+      // Resume only when ALL peers are ready AND the room was playing before buffering
+      if (room.buffering.size === 0 && room.wasPlayingBeforeBuffering) {
+        room.isPlaying = true;
+        room.wasPlayingBeforeBuffering = false;
         io.to(code).emit('play', { currentTime: room.currentTime, fromUserId: 'system', sentAt: Date.now() });
       }
     });
@@ -417,6 +429,7 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       room.episodeId   = episodeId;
       room.currentTime = 0;
       room.isPlaying   = false;
+      room.wasPlayingBeforeBuffering = false;
       // Clear all buffering state — new episode means fresh start
       room.bufferingTimers.forEach(t => clearTimeout(t));
       room.bufferingTimers.clear();
