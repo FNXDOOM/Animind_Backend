@@ -155,6 +155,10 @@ function normalizeLanguage(raw?: string): string {
   return raw;
 }
 
+function isJapaneseLanguage(value?: string): boolean {
+  return /\b(japanese|jpn|ja|jp)\b/i.test(String(value ?? '').toLowerCase());
+}
+
 function normalizeAudioCodec(raw?: string): string {
   return String(raw ?? '').toLowerCase().trim();
 }
@@ -637,9 +641,58 @@ export async function streamEpisode(req: Request, res: Response) {
       try {
         filePath = await getOrCreateAudioVariant(filePath, id, selectedAudioTrackIndex);
       } catch (variantError: any) {
-        console.error('[Stream][AudioVariant] Error:', variantError?.message || variantError);
-        res.status(400).json({ error: 'Selected audio track is unavailable for this episode.' });
-        return;
+        console.warn('[Stream][AudioVariant] Selected track failed, attempting fallback:', variantError?.message || variantError);
+
+        const availableTracks = await getEmbeddedAudioTracks(filePath).catch(() => []);
+        const selectedTrack = availableTracks.find(track => track.streamIndex === selectedAudioTrackIndex);
+        const selectedIsJapanese = isJapaneseLanguage(selectedTrack?.language);
+
+        const fallbackCandidates = availableTracks
+          .filter(track => track.streamIndex !== selectedAudioTrackIndex)
+          .sort((a, b) => {
+            const aSafe = a.browserSupported ? 1 : 0;
+            const bSafe = b.browserSupported ? 1 : 0;
+            return bSafe - aSafe;
+          });
+
+        const primaryFallbackOrder = selectedIsJapanese
+          ? fallbackCandidates.filter(track => !isJapaneseLanguage(track.language))
+          : fallbackCandidates;
+
+        const tried = new Set<number>();
+        let fallbackPath: string | null = null;
+
+        for (const track of primaryFallbackOrder) {
+          tried.add(track.streamIndex);
+          try {
+            fallbackPath = await getOrCreateAudioVariant(filePath, id, track.streamIndex);
+            console.warn(`[Stream][AudioVariant] Fallback track selected: #${track.streamIndex} (${track.language})`);
+            break;
+          } catch {
+            // Try next fallback track.
+          }
+        }
+
+        if (!fallbackPath) {
+          for (const track of fallbackCandidates) {
+            if (tried.has(track.streamIndex)) continue;
+            try {
+              fallbackPath = await getOrCreateAudioVariant(filePath, id, track.streamIndex);
+              console.warn(`[Stream][AudioVariant] Last-resort fallback track selected: #${track.streamIndex} (${track.language})`);
+              break;
+            } catch {
+              // Try next fallback track.
+            }
+          }
+        }
+
+        if (!fallbackPath) {
+          console.error('[Stream][AudioVariant] No playable fallback audio track found.');
+          res.status(400).json({ error: 'Selected audio track is unavailable for this episode.' });
+          return;
+        }
+
+        filePath = fallbackPath;
       }
     }
 
