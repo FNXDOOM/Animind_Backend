@@ -6,7 +6,8 @@
  */
 
 import { S3Client, ListObjectsV2Command, ListObjectsV2CommandOutput } from '@aws-sdk/client-s3';
-import { readdir, stat, mkdir } from 'fs/promises';
+import { readdir, stat, mkdir, access } from 'fs/promises';
+import { constants as fsConstants } from 'fs';
 import { spawn } from 'child_process';
 import path from 'path';
 import { env } from '../config/env.js';
@@ -16,6 +17,7 @@ import { fetchAniListMeta } from './anilist.service.js';
 
 // ── S3 Client (lazy-initialized) ────────────────────────────────────────────
 let s3Client: S3Client | null = null;
+let hasWarnedMissingEpisodeSeasonSchema = false;
 
 function getS3Client(): S3Client {
   if (!s3Client) {
@@ -158,23 +160,61 @@ async function getOrCreateShow(title: string): Promise<string> {
  */
 async function upsertEpisode(
   showId: string,
+  seasonNumber: number,
   episodeNumber: number,
   filePath: string,
   bucketName: string
 ): Promise<{ id: string; file_path: string } | null> {
-  const { data, error } = await supabase
+  const normalizedSeasonNumber = Number.isFinite(seasonNumber) && seasonNumber > 0
+    ? Math.floor(seasonNumber)
+    : 1;
+
+  let { data, error } = await supabase
     .from('episodes')
     .upsert(
       {
         show_id: showId,
+        season_number: normalizedSeasonNumber,
         episode_number: episodeNumber,
         file_path: filePath,
         bucket_name: bucketName,
       },
-      { onConflict: 'show_id,episode_number' } // comma-separated column list matching UNIQUE(show_id, episode_number)
+      { onConflict: 'show_id,season_number,episode_number' }
     )
     .select('id, file_path')
     .single();
+
+  if (error) {
+    const isSeasonSchemaIssue =
+      /season_number/i.test(error.message) ||
+      /no unique|on conflict/i.test(error.message);
+
+    if (isSeasonSchemaIssue) {
+      if (!hasWarnedMissingEpisodeSeasonSchema) {
+        hasWarnedMissingEpisodeSeasonSchema = true;
+        console.warn(
+          '[Scanner] episodes season-aware schema is missing. Run migration supabase-episodes-season-migration.sql to avoid cross-season episode collisions.'
+        );
+      }
+
+      const fallback = await supabase
+        .from('episodes')
+        .upsert(
+          {
+            show_id: showId,
+            episode_number: episodeNumber,
+            file_path: filePath,
+            bucket_name: bucketName,
+          },
+          { onConflict: 'show_id,episode_number' }
+        )
+        .select('id, file_path')
+        .single();
+
+      data = fallback.data;
+      error = fallback.error;
+    }
+  }
 
   if (error) {
     console.error(
@@ -267,17 +307,61 @@ function formatEpisodeFolder(episodeNumber: number): string {
   return `Episode ${String(episodeNumber).padStart(width, '0')}`;
 }
 
-async function extractSubtitlesToDisk(filePath: string, episodeNumber: number): Promise<void> {
+function formatSeasonFolder(seasonNumber: number): string {
+  const width = seasonNumber >= 100 ? 3 : 2;
+  return `Season ${String(seasonNumber).padStart(width, '0')}`;
+}
+
+function buildSubtitleEpisodeRelativePath(episodeNumber: number, seasonNumber?: number): string {
+  const normalizedSeason = Number.isFinite(seasonNumber as number) && (seasonNumber as number) > 1
+    ? Math.floor(seasonNumber as number)
+    : 1;
+  const episodeFolder = formatEpisodeFolder(episodeNumber);
+
+  if (normalizedSeason > 1) {
+    return path.join('Subtitles', formatSeasonFolder(normalizedSeason), episodeFolder);
+  }
+
+  return path.join('Subtitles', episodeFolder);
+}
+
+async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, seasonNumber?: number): Promise<void> {
   // Only for local mode — S3 files can't be piped through ffmpeg this way
   if (env.STORAGE_MODE !== 'local') return;
 
   const fullVideoPath = path.resolve(env.LOCAL_STORAGE_PATH, filePath);
   const showRootDir = getShowRootDirectory(filePath);
-  const subtitlesDir = path.join(showRootDir, 'Subtitles', formatEpisodeFolder(episodeNumber));
+  const subtitleRelativePath = buildSubtitleEpisodeRelativePath(episodeNumber, seasonNumber);
+  const subtitlesDir = path.join(showRootDir, subtitleRelativePath);
   const ffprobeBin = process.env.FFPROBE_PATH || 'ffprobe';
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
 
   await mkdir(subtitlesDir, { recursive: true });
+
+  // If subtitle files already exist for this episode, don't try to regenerate.
+  // This prevents repeated ffmpeg writes on read-only subtitle directories.
+  try {
+    const existingSubtitleEntries = await readdir(subtitlesDir);
+    const hasExistingSubtitles = existingSubtitleEntries.some(entry =>
+      ['.vtt', '.srt', '.ass'].includes(path.extname(entry).toLowerCase())
+    );
+    if (hasExistingSubtitles) {
+      return;
+    }
+  } catch {
+    // Continue; ffmpeg path below will still attempt extraction.
+  }
+
+  // Skip extraction when directory isn't writable (common with bind mounts).
+  try {
+    await stat(subtitlesDir);
+    await access(subtitlesDir, fsConstants.W_OK);
+  } catch {
+    console.warn(
+      `[Scanner] Subtitle directory not writable for ${path.basename(filePath)} (${subtitleRelativePath}). Skipping extraction.`
+    );
+    return;
+  }
 
   // 1. Probe for subtitle streams
   let probeResult: { code: number; stdout: string; stderr: string };
@@ -347,17 +431,25 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number): 
     ]).catch(() => null);
 
     if (result && result.code === 0) {
-      console.log(`[Scanner] Extracted subtitle: ${path.join('Subtitles', formatEpisodeFolder(episodeNumber), vttFileName)}`);
+      console.log(`[Scanner] Extracted subtitle: ${path.join(subtitleRelativePath, vttFileName)}`);
       extracted++;
     } else {
       const reason = result?.stderr?.trim().split('\n').pop() ?? 'unknown error';
       console.warn(`[Scanner] Could not convert stream ${stream.index} (codec: ${codec}) from ${path.basename(filePath)} to VTT — ${reason}`);
       import('fs').then(fs => fs.promises.unlink(vttFilePath).catch(() => undefined));
+
+      // Don't spam one warning per stream when mount permissions block writes.
+      if (/permission denied/i.test(reason)) {
+        console.warn(
+          `[Scanner] Stopping subtitle extraction for ${path.basename(filePath)} because output directory is not writable.`
+        );
+        break;
+      }
     }
   }
 
   if (extracted > 0) {
-    console.log(`[Scanner] Saved ${extracted} subtitle file(s) for ${path.basename(filePath)} in ${path.join('Subtitles', formatEpisodeFolder(episodeNumber))}.`);
+    console.log(`[Scanner] Saved ${extracted} subtitle file(s) for ${path.basename(filePath)} in ${subtitleRelativePath}.`);
   }
 }
 
@@ -414,6 +506,7 @@ export async function runScan(): Promise<ScanResult> {
       const showId = await getOrCreateShow(parsed.title);
       const upsertedEpisode = await upsertEpisode(
         showId,
+        parsed.season ?? 1,
         parsed.episode,
         filePath,
         env.STORAGE_MODE === 's3' ? env.S3_BUCKET_NAME : 'local'
@@ -429,7 +522,7 @@ export async function runScan(): Promise<ScanResult> {
       // Awaited sequentially — on a 2-core/1GB VPS running concurrent ffmpeg
       // processes causes CPU/memory spikes that kill streaming for active users.
       // Already-extracted .vtt files are skipped on subsequent scans.
-      await extractSubtitlesToDisk(filePath, parsed.episode).catch((err: any) =>
+      await extractSubtitlesToDisk(filePath, parsed.episode, parsed.season).catch((err: any) =>
         console.error(`[Scanner] Subtitle extraction error for ${filePath}:`, err.message)
       );
     } catch (err: any) {
