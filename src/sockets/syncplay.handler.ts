@@ -4,6 +4,11 @@
  * Real-time watch-party (SyncPlay) using Socket.IO.
  * Room lifecycle: createRoom → joinRoom → play/pause/seek → leaveRoom
  *
+ * Implements a Plex-style "Readiness Gate":
+ *   Playback is HELD until every peer in the room reports their video is
+ *   buffered and ready.  This eliminates desyncs caused by one side buffering
+ *   while the other plays ahead.
+ *
  * Room state is kept in-memory. For multi-process deployments, replace the
  * `rooms` Map with a Redis adapter: https://socket.io/docs/v4/redis-adapter/
  */
@@ -24,15 +29,21 @@ interface Room {
   displayNames: Map<string, string>;   // userId  → displayName
   currentTime: number;
   isPlaying: boolean;
-  wasPlayingBeforeBuffering: boolean;  // saved state to restore after buffering
-  buffering: Set<string>;              // socketIds currently buffering
-  bufferingTimers: Map<string, ReturnType<typeof setTimeout>>; // socketId → force-resume timer
+  /** Plex-style readiness gate: socketIds that have confirmed video is buffered */
+  readyPeers: Set<string>;
+  /** Whether the room is currently waiting for all peers to report ready */
+  waitingForReady: boolean;
+  /** Saved play intent so we know to auto-play once all peers are ready */
+  playIntentAfterReady: boolean;
+  /** Safety-net force-resume timers (per socket) */
+  readyTimers: Map<string, ReturnType<typeof setTimeout>>;
 }
 
 // ── In-memory room store ─────────────────────────────────────────────────────
 const rooms = new Map<string, Room>();
 const userDisplayNameCache = new Map<string, string>();
 const SYNCPLAY_SOCKET_PATH = '/api/socket.io';
+const READY_TIMEOUT_MS = 30_000; // force-resume after 30s if a peer never reports ready
 let hasWarnedMissingEndedAtColumn = false;
 
 function isMissingEndedAtColumnError(message: string): boolean {
@@ -135,6 +146,97 @@ async function getUserDisplayName(userId: string): Promise<string> {
   return displayName;
 }
 
+// ── Readiness gate helpers ───────────────────────────────────────────────────
+
+/**
+ * Initiate a readiness gate: pause everyone, clear ready states, ask all
+ * peers to buffer at `room.currentTime` and report back `ready`.
+ */
+function initiateReadinessGate(
+  io: SocketServer,
+  room: Room,
+  playAfterReady: boolean,
+): void {
+  // Clear previous timers
+  room.readyTimers.forEach(t => clearTimeout(t));
+  room.readyTimers.clear();
+
+  room.readyPeers.clear();
+  room.waitingForReady = true;
+  room.playIntentAfterReady = playAfterReady;
+  room.isPlaying = false;
+
+  const readyList = Array.from(room.participants.entries()).map(([sid, uid]) => ({
+    socketId: sid,
+    userId: uid,
+    displayName: room.displayNames.get(uid) ?? uid.slice(0, 8),
+    ready: false,
+  }));
+
+  io.to(room.code).emit('waitForReady', {
+    currentTime: room.currentTime,
+    peers: readyList,
+    totalPeers: room.participants.size,
+    readyCount: 0,
+    sentAt: Date.now(),
+  });
+
+  console.log(`[SyncPlay] Room ${room.code}: readiness gate opened (${room.participants.size} peers, playAfter=${playAfterReady})`);
+
+  // Set up force-resume timers per peer
+  for (const [socketId, uid] of room.participants.entries()) {
+    const timer = setTimeout(async () => {
+      if (!room.readyPeers.has(socketId) && room.waitingForReady) {
+        room.readyPeers.add(socketId);
+        room.readyTimers.delete(socketId);
+        const dn = await getUserDisplayName(uid);
+        io.to(room.code).emit('peerReady', {
+          userId: uid,
+          displayName: dn,
+          timedOut: true,
+          readyCount: room.readyPeers.size,
+          totalPeers: room.participants.size,
+        });
+        console.log(`[SyncPlay] Room ${room.code}: peer ${uid} force-readied (timeout)`);
+        tryResumeAfterReady(io, room);
+      }
+    }, READY_TIMEOUT_MS);
+    room.readyTimers.set(socketId, timer);
+  }
+}
+
+/**
+ * Check if all peers are ready. If so, close the gate and send coordinated
+ * play (or just leave paused if no play intent).
+ */
+function tryResumeAfterReady(io: SocketServer, room: Room): void {
+  if (!room.waitingForReady) return;
+  if (room.readyPeers.size < room.participants.size) return;
+
+  // All peers ready — close the gate
+  room.waitingForReady = false;
+  room.readyTimers.forEach(t => clearTimeout(t));
+  room.readyTimers.clear();
+
+  console.log(`[SyncPlay] Room ${room.code}: all peers ready`);
+
+  if (room.playIntentAfterReady) {
+    room.isPlaying = true;
+    room.playIntentAfterReady = false;
+    io.to(room.code).emit('syncPlay', {
+      currentTime: room.currentTime,
+      sentAt: Date.now(),
+    });
+    console.log(`[SyncPlay] Room ${room.code}: coordinated play at ${room.currentTime.toFixed(1)}s`);
+  } else {
+    // Just notify the gate is closed — stay paused
+    io.to(room.code).emit('syncPaused', {
+      currentTime: room.currentTime,
+      sentAt: Date.now(),
+    });
+  }
+}
+
 // ── Handler ──────────────────────────────────────────────────────────────────
 
 export function initSyncPlay(httpServer: HttpServer): SocketServer {
@@ -207,9 +309,10 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
         displayNames: new Map([[userId, hostDisplayName]]),
         currentTime: 0,
         isPlaying: false,
-        wasPlayingBeforeBuffering: false,
-        buffering: new Set(),
-        bufferingTimers: new Map(),
+        readyPeers: new Set(),
+        waitingForReady: false,
+        playIntentAfterReady: false,
+        readyTimers: new Map(),
       };
 
       rooms.set(code, room);
@@ -274,16 +377,22 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
           success: true,
           episodeId: room.episodeId,
           currentTime: room.currentTime,
-          isPlaying: room.isPlaying,
+          isPlaying: false, // Always false — readiness gate will coordinate start
           hostUserId: room.hostUserId,
           participantCount: room.participants.size,
           participants: participantList,
           sentAt: Date.now(),
         });
       }
+
+      // ── Plex-style: new joiner triggers readiness gate ──
+      // Pause everyone and wait for ALL peers (including new joiner) to buffer
+      const wasPlaying = room.isPlaying;
+      room.isPlaying = false;
+      initiateReadinessGate(io, room, wasPlaying);
     });
 
-    // ── play ──────────────────────────────────────────────────────────────────
+    // ── play (host-initiated → readiness gate) ───────────────────────────────
     socket.on('play', ({ currentTime }: { currentTime: number }) => {
       const code = (socket as any).roomCode;
       const room = rooms.get(code);
@@ -293,10 +402,17 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
         return;
       }
 
-      room.isPlaying = true;
       room.currentTime = currentTime;
-      // Broadcast to all except sender — include sentAt for client-side latency compensation
-      socket.to(code).emit('play', { currentTime, fromUserId: userId, sentAt: Date.now() });
+
+      // If there's only one peer (host alone), skip the gate — play immediately
+      if (room.participants.size === 1) {
+        room.isPlaying = true;
+        socket.emit('syncPlay', { currentTime, sentAt: Date.now() });
+        return;
+      }
+
+      // Multiple peers: initiate readiness gate — everyone must buffer then report ready
+      initiateReadinessGate(io, room, true);
     });
 
     // ── pause ─────────────────────────────────────────────────────────────────
@@ -311,10 +427,20 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
 
       room.isPlaying = false;
       room.currentTime = currentTime;
+
+      // Cancel any pending readiness gate
+      if (room.waitingForReady) {
+        room.waitingForReady = false;
+        room.playIntentAfterReady = false;
+        room.readyTimers.forEach(t => clearTimeout(t));
+        room.readyTimers.clear();
+        room.readyPeers.clear();
+      }
+
       socket.to(code).emit('pause', { currentTime, fromUserId: userId, sentAt: Date.now() });
     });
 
-    // ── seek ──────────────────────────────────────────────────────────────────
+    // ── seek (host-initiated → readiness gate) ───────────────────────────────
     socket.on('seek', ({ time }: { time: number }) => {
       const code = (socket as any).roomCode;
       const room = rooms.get(code);
@@ -324,71 +450,69 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
         return;
       }
 
+      const wasPlaying = room.isPlaying;
       room.currentTime = time;
-      socket.to(code).emit('seek', { time, fromUserId: userId, sentAt: Date.now() });
-    });
 
-    // ── buffering ─────────────────────────────────────────────────────────────
-    socket.on('buffering', async () => {
-      const code = (socket as any).roomCode;
-      const room = rooms.get(code);
-      if (!room) return;
-
-      // Idempotent — ignore if already registered as buffering
-      if (room.buffering.has(socket.id)) return;
-
-      // Save the current play state BEFORE pausing so we can restore it
-      // when all peers finish buffering. Only save on first buffering peer.
-      if (room.buffering.size === 0) {
-        room.wasPlayingBeforeBuffering = room.isPlaying;
+      // If alone, just broadcast seek directly
+      if (room.participants.size === 1) {
+        socket.emit('seek', { time, fromUserId: userId, sentAt: Date.now() });
+        return;
       }
-      room.buffering.add(socket.id);
-      room.isPlaying = false;
 
-      const displayName = await getUserDisplayName(userId);
-
-      // Only pause OTHER peers — NOT the host.
-      socket.to(code).emit('pause', { currentTime: room.currentTime, fromUserId: 'system', reason: 'buffering', sentAt: Date.now() });
-      io.to(code).emit('peerBuffering', { userId, displayName });
-
-      // Force-resume after 30s so one slow peer can't block the whole room
-      const forceTimer = setTimeout(async () => {
-        if (!room.buffering.has(socket.id)) return; // already resolved
-        room.buffering.delete(socket.id);
-        room.bufferingTimers.delete(socket.id);
-        const dn = await getUserDisplayName(userId);
-        io.to(code).emit('peerReady', { userId, displayName: dn, timedOut: true });
-        if (room.buffering.size === 0 && room.wasPlayingBeforeBuffering) {
-          room.isPlaying = true;
-          io.to(code).emit('play', { currentTime: room.currentTime, fromUserId: 'system', sentAt: Date.now() });
-        }
-      }, 30_000);
-      room.bufferingTimers.set(socket.id, forceTimer);
+      // Multiple peers: seek causes a readiness gate so everyone re-buffers
+      initiateReadinessGate(io, room, wasPlaying);
     });
 
-    // ── ready (buffering done) ────────────────────────────────────────────────
+    // ── ready (peer reports video is buffered and ready to play) ──────────────
     socket.on('ready', async () => {
       const code = (socket as any).roomCode;
       const room = rooms.get(code);
       if (!room) return;
 
-      // Idempotent — ignore if this socket wasn't buffering
-      if (!room.buffering.has(socket.id)) return;
-      room.buffering.delete(socket.id);
+      // Ignore if not in a readiness gate or already marked ready
+      if (!room.waitingForReady) return;
+      if (room.readyPeers.has(socket.id)) return;
 
-      // Cancel the 30s force-resume timer since they recovered naturally
-      const timer = room.bufferingTimers.get(socket.id);
-      if (timer) { clearTimeout(timer); room.bufferingTimers.delete(socket.id); }
+      room.readyPeers.add(socket.id);
+
+      // Cancel force-resume timer for this peer
+      const timer = room.readyTimers.get(socket.id);
+      if (timer) { clearTimeout(timer); room.readyTimers.delete(socket.id); }
 
       const displayName = await getUserDisplayName(userId);
-      io.to(code).emit('peerReady', { userId, displayName });
+      io.to(code).emit('peerReady', {
+        userId,
+        displayName,
+        readyCount: room.readyPeers.size,
+        totalPeers: room.participants.size,
+      });
 
-      // Resume only when ALL peers are ready AND the room was playing before buffering
-      if (room.buffering.size === 0 && room.wasPlayingBeforeBuffering) {
-        room.isPlaying = true;
-        room.wasPlayingBeforeBuffering = false;
-        io.to(code).emit('play', { currentTime: room.currentTime, fromUserId: 'system', sentAt: Date.now() });
-      }
+      console.log(`[SyncPlay] Room ${code}: peer ${userId} ready (${room.readyPeers.size}/${room.participants.size})`);
+
+      tryResumeAfterReady(io, room);
+    });
+
+    // ── buffering (mid-stream stall — safety net) ────────────────────────────
+    // If a peer's video stalls during active playback (e.g. network congestion),
+    // trigger a readiness gate so everyone pauses and waits.  Ignored if a gate
+    // is already open (join/play/seek already handling it).
+    socket.on('buffering', async () => {
+      const code = (socket as any).roomCode;
+      const room = rooms.get(code);
+      if (!room) return;
+
+      // Already in a readiness gate — no need to open another one
+      if (room.waitingForReady) return;
+
+      // Only matters if the room was actively playing
+      if (!room.isPlaying) return;
+
+      const displayName = await getUserDisplayName(userId);
+      console.log(`[SyncPlay] Room ${code}: mid-stream buffering from ${displayName} — opening readiness gate`);
+
+      // Save current time from the server's perspective
+      // (client may be slightly behind; server time is canonical)
+      initiateReadinessGate(io, room, true /* resume play after all ready */);
     });
 
     // ── transferHost ───────────────────────────────────────────────────────────
@@ -401,7 +525,7 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
         return;
       }
 
-      // Find the target’s socket id
+      // Find the target's socket id
       const targetSocketId = Array.from(room.participants.entries())
         .find(([, uid]) => uid === targetUserId)?.[0];
       if (!targetSocketId) {
@@ -429,24 +553,18 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       room.episodeId   = episodeId;
       room.currentTime = 0;
       room.isPlaying   = false;
-      room.wasPlayingBeforeBuffering = false;
-      // Clear all buffering state — new episode means fresh start
-      room.bufferingTimers.forEach(t => clearTimeout(t));
-      room.bufferingTimers.clear();
-      room.buffering.clear();
+      room.playIntentAfterReady = false;
+      // Clear all readiness state — new episode means fresh start
+      room.waitingForReady = false;
+      room.readyTimers.forEach(t => clearTimeout(t));
+      room.readyTimers.clear();
+      room.readyPeers.clear();
 
       socket.to(code).emit('episodeChanged', { episodeId, sentAt: Date.now() });
       console.log(`[SyncPlay] Room ${code} episode changed to ${episodeId} by host ${userId}`);
     });
 
     // ── NTP-style clock sync ping/pong ────────────────────────────────────────
-    // Client sends { clientSendTime } → server echoes back { clientSendTime, serverTime }.
-    // Client computes:
-    //   roundTrip     = Date.now() - clientSendTime
-    //   oneWayLatency = roundTrip / 2
-    //   clockOffset   = serverTime - (clientSendTime + oneWayLatency)
-    // After TIMESYNC_SAMPLES rounds, client takes the median clockOffset and
-    // uses it to correct all sentAt timestamps, eliminating clock-skew error.
     socket.on('timesync_ping', ({ clientSendTime }: { clientSendTime: number }) => {
       socket.emit('timesync_pong', {
         clientSendTime,          // echoed so client can compute RTT
@@ -463,6 +581,7 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       socket.emit('sync', {
         currentTime: room.currentTime,
         isPlaying: room.isPlaying,
+        waitingForReady: room.waitingForReady,
         sentAt: Date.now(),
       });
     });
@@ -476,13 +595,13 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
       if (!room) return;
 
       room.participants.delete(socket.id);
-      room.buffering.delete(socket.id);
-      const bt = room.bufferingTimers.get(socket.id);
-      if (bt) { clearTimeout(bt); room.bufferingTimers.delete(socket.id); }
+      room.readyPeers.delete(socket.id);
+      const bt = room.readyTimers.get(socket.id);
+      if (bt) { clearTimeout(bt); room.readyTimers.delete(socket.id); }
 
       if (room.participants.size === 0) {
         // Clean up empty room — clear all remaining timers first
-        room.bufferingTimers.forEach(t => clearTimeout(t));
+        room.readyTimers.forEach(t => clearTimeout(t));
         rooms.delete(code);
         await markWatchPartyEndedByCode(code);
         console.log(`[SyncPlay] Room ${code} closed (all left).`);
@@ -499,8 +618,14 @@ export function initSyncPlay(httpServer: HttpServer): SocketServer {
             console.log(`[SyncPlay] Host left room ${code}, new host: ${newHostUserId}`);
           }
         }
+
         const displayName = await getUserDisplayName(userId);
         socket.to(code).emit('peerLeft', { userId, displayName, participantCount: room.participants.size });
+
+        // If a peer left during a readiness gate, check if remaining peers are all ready
+        if (room.waitingForReady) {
+          tryResumeAfterReady(io, room);
+        }
       }
 
       console.log(`[SyncPlay] Disconnected: ${socket.id} (user: ${userId})`);
