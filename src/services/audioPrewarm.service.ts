@@ -6,6 +6,20 @@ import { env } from '../config/env.js';
 
 interface AudioStreamMeta {
   streamIndex: number;
+  codec: string;
+  browserSupported: boolean;
+}
+
+const BROWSER_SAFE_AUDIO_CODECS = new Set(['aac', 'mp3', 'opus', 'vorbis']);
+
+function normalizeAudioCodec(raw?: string): string {
+  return String(raw ?? '').toLowerCase().trim();
+}
+
+function isBrowserSafeAudioCodec(codec?: string): boolean {
+  const normalized = normalizeAudioCodec(codec);
+  if (!normalized) return false;
+  return normalized === 'mp4a' || normalized.startsWith('aac') || BROWSER_SAFE_AUDIO_CODECS.has(normalized);
 }
 
 function normalizePositiveInt(value: number, fallback: number, min = 1, max = 128): number {
@@ -49,19 +63,31 @@ async function getEmbeddedAudioStreamIndexes(fullVideoPath: string): Promise<Aud
   }
 
   try {
-    const parsed = JSON.parse(probeResult.stdout) as { streams?: Array<{ index?: number }> };
+    const parsed = JSON.parse(probeResult.stdout) as { streams?: Array<{ index?: number; codec_name?: string }> };
     return (parsed.streams ?? [])
       .filter(stream => typeof stream?.index === 'number')
-      .map(stream => ({ streamIndex: stream.index as number }));
+      .map(stream => {
+        const codec = normalizeAudioCodec(stream.codec_name);
+        return {
+          streamIndex: stream.index as number,
+          codec,
+          browserSupported: isBrowserSafeAudioCodec(codec),
+        };
+      });
   } catch {
     return [];
   }
 }
 
-async function getOrCreateAudioVariant(sourcePath: string, episodeId: string, audioTrackIndex: number): Promise<string> {
+async function getOrCreateAudioVariant(
+  sourcePath: string,
+  episodeId: string,
+  audioTrackIndex: number,
+  preferCopyAudio: boolean
+): Promise<string> {
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
   const sourceStat = await stat(sourcePath);
-  const sourceSignature = `${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}`;
+  const sourceSignature = `${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}:${audioTrackIndex}:${preferCopyAudio ? 'copy' : 'aac'}`;
   const variantHash = crypto.createHash('sha1').update(sourceSignature).digest('hex').slice(0, 12);
   const cacheDir = path.resolve(env.LOCAL_STORAGE_PATH, '.animind-audio-cache');
   const outputPath = path.join(cacheDir, `${episodeId}-a${audioTrackIndex}-${variantHash}.mp4`);
@@ -77,17 +103,21 @@ async function getOrCreateAudioVariant(sourcePath: string, episodeId: string, au
     // Cache miss; build below.
   }
 
-  let result = await runProcess(ffmpegBin, [
-    '-y',
-    '-v', 'error',
-    '-i', sourcePath,
-    '-map', '0:v:0',
-    '-map', `0:${audioTrackIndex}`,
-    '-c:v', 'copy',
-    '-c:a', 'copy',
-    '-movflags', '+faststart',
-    outputPath,
-  ]).catch(() => null);
+  let result: { code: number; stdout: string; stderr: string } | null = null;
+
+  if (preferCopyAudio) {
+    result = await runProcess(ffmpegBin, [
+      '-y',
+      '-v', 'error',
+      '-i', sourcePath,
+      '-map', '0:v:0',
+      '-map', `0:${audioTrackIndex}`,
+      '-c:v', 'copy',
+      '-c:a', 'copy',
+      '-movflags', '+faststart',
+      outputPath,
+    ]).catch(() => null);
+  }
 
   if (!result || result.code !== 0) {
     result = await runProcess(ffmpegBin, [
@@ -134,19 +164,23 @@ export async function prewarmEpisodeAudioVariants(
     const fullVideoPath = path.resolve(env.LOCAL_STORAGE_PATH, episode.filePath);
     const streams = await getEmbeddedAudioStreamIndexes(fullVideoPath).catch(() => []);
 
-    // Track 0 is treated as default source stream; prewarm alternate tracks only.
-    const alternateStreams = streams.slice(1, 1 + maxTracksPerEpisode);
-    for (const track of alternateStreams) {
+    // Only prewarm tracks that are not browser-safe to keep CPU usage low.
+    const unsupportedStreams = streams
+      .filter(track => !track.browserSupported)
+      .slice(0, maxTracksPerEpisode);
+
+    for (const track of unsupportedStreams) {
       const key = `${episode.id}:${track.streamIndex}`;
       if (inFlightPrewarm.has(key)) continue;
 
       inFlightPrewarm.add(key);
       try {
-        await getOrCreateAudioVariant(fullVideoPath, episode.id, track.streamIndex);
+        await getOrCreateAudioVariant(fullVideoPath, episode.id, track.streamIndex, track.browserSupported);
       } catch (error: any) {
         console.warn('[Prewarm][AudioVariant] Failed:', {
           episodeId: episode.id,
           streamIndex: track.streamIndex,
+          codec: track.codec,
           error: error?.message || String(error),
         });
       } finally {
