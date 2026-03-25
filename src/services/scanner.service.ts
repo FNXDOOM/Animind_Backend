@@ -189,7 +189,7 @@ async function upsertEpisode(
 
 /** Remove DB episodes whose file paths no longer exist in the scanned set */
 async function pruneDeletedFiles(foundPaths: Set<string>) {
-  const { data: allEpisodes } = await supabase.from('episodes').select('id, file_path');
+  const { data: allEpisodes } = await supabase.from('episodes').select('id, file_path, show_id');
   if (!allEpisodes) return;
 
   const toDelete = allEpisodes
@@ -199,6 +199,32 @@ async function pruneDeletedFiles(foundPaths: Set<string>) {
   if (toDelete.length > 0) {
     await supabase.from('episodes').delete().in('id', toDelete);
     console.log(`[Scanner] Pruned ${toDelete.length} missing episode(s) from DB.`);
+  }
+
+  // Remove stale shows that no longer have any episodes after pruning.
+  const { data: remainingEpisodes } = await supabase.from('episodes').select('show_id');
+  const activeShowIds = new Set((remainingEpisodes ?? []).map(ep => ep.show_id).filter(Boolean));
+
+  const { data: allShows } = await supabase.from('shows').select('id');
+  if (!allShows?.length) return;
+
+  const orphanShowIds = allShows
+    .map(show => show.id)
+    .filter(showId => !activeShowIds.has(showId));
+
+  if (orphanShowIds.length > 0) {
+    const { error: deleteShowError } = await supabase
+      .from('shows')
+      .delete()
+      .in('id', orphanShowIds);
+
+    if (deleteShowError) {
+      console.warn(
+        `[Scanner] Could not prune ${orphanShowIds.length} orphan show(s): ${deleteShowError.message}`
+      );
+    } else {
+      console.log(`[Scanner] Pruned ${orphanShowIds.length} orphan show(s) with no episodes.`);
+    }
   }
 }
 

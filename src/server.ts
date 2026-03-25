@@ -4,6 +4,7 @@ import app from './app.js';
 import { env } from './config/env.js';
 import { initSyncPlay } from './sockets/syncplay.handler.js';
 import { runScan } from './services/scanner.service.js';
+import { cleanupEndedWatchParties } from './services/syncplayCleanup.service.js';
 
 // ── HTTP Server ───────────────────────────────────────────────────────────────
 const httpServer = http.createServer(app);
@@ -25,6 +26,36 @@ if (cron.validate(env.SCANNER_CRON)) {
   console.log(`[Server] Scanner cron scheduled: "${env.SCANNER_CRON}"`);
 } else {
   console.warn(`[Server] Invalid SCANNER_CRON expression: "${env.SCANNER_CRON}". Cron not scheduled.`);
+}
+
+// ── Cron SyncPlay Cleanup ───────────────────────────────────────────────────
+if (env.SYNCPLAY_ENDED_CLEANUP_ENABLED) {
+  const runSyncPlayCleanup = async () => {
+    try {
+      const cleanup = await cleanupEndedWatchParties(env.SYNCPLAY_ENDED_TTL_MINUTES);
+      if (cleanup.deletedRooms > 0 || cleanup.deletedParticipantRows > 0) {
+        console.log(
+          `[SyncPlay Cleanup] Removed ${cleanup.deletedRooms}/${cleanup.expiredRooms} ended room(s) and ${cleanup.deletedParticipantRows} participant row(s).`
+        );
+      }
+    } catch (err: any) {
+      console.error('[SyncPlay Cleanup] Failed:', err.message);
+    }
+  };
+
+  // One immediate pass on startup so already-expired rooms are cleaned quickly.
+  void runSyncPlayCleanup();
+
+  if (cron.validate(env.SYNCPLAY_CLEANUP_CRON)) {
+    cron.schedule(env.SYNCPLAY_CLEANUP_CRON, runSyncPlayCleanup);
+    console.log(
+      `[Server] SyncPlay cleanup cron scheduled: "${env.SYNCPLAY_CLEANUP_CRON}" (TTL ${env.SYNCPLAY_ENDED_TTL_MINUTES}m)`
+    );
+  } else {
+    console.warn(
+      `[Server] Invalid SYNCPLAY_CLEANUP_CRON expression: "${env.SYNCPLAY_CLEANUP_CRON}". SyncPlay cleanup cron not scheduled.`
+    );
+  }
 }
 
 // ── Start ──────────────────────────────────────────────────────────────────────
