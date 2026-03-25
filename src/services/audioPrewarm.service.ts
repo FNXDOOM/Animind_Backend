@@ -8,12 +8,26 @@ interface AudioStreamMeta {
   streamIndex: number;
   codec: string;
   browserSupported: boolean;
+  language: string;
 }
 
 const BROWSER_SAFE_AUDIO_CODECS = new Set(['aac', 'mp3', 'opus', 'vorbis']);
 
 function normalizeAudioCodec(raw?: string): string {
   return String(raw ?? '').toLowerCase().trim();
+}
+
+function normalizeLanguage(raw?: string): string {
+  if (!raw) return 'Unknown';
+  const val = raw.toLowerCase();
+  if (val === 'eng' || val === 'en' || val.includes('english')) return 'English';
+  if (val === 'jpn' || val === 'jp' || val.includes('japanese')) return 'Japanese';
+  if (val === 'spa' || val === 'es' || val.includes('spanish')) return 'Spanish';
+  return raw;
+}
+
+function isJapaneseLanguage(value?: string): boolean {
+  return /\b(japanese|jpn|ja|jp)\b/i.test(String(value ?? '').toLowerCase());
 }
 
 function isBrowserSafeAudioCodec(codec?: string): boolean {
@@ -63,7 +77,9 @@ async function getEmbeddedAudioStreamIndexes(fullVideoPath: string): Promise<Aud
   }
 
   try {
-    const parsed = JSON.parse(probeResult.stdout) as { streams?: Array<{ index?: number; codec_name?: string }> };
+    const parsed = JSON.parse(probeResult.stdout) as {
+      streams?: Array<{ index?: number; codec_name?: string; tags?: { language?: string } }>;
+    };
     return (parsed.streams ?? [])
       .filter(stream => typeof stream?.index === 'number')
       .map(stream => {
@@ -72,6 +88,7 @@ async function getEmbeddedAudioStreamIndexes(fullVideoPath: string): Promise<Aud
           streamIndex: stream.index as number,
           codec,
           browserSupported: isBrowserSafeAudioCodec(codec),
+          language: normalizeLanguage(stream.tags?.language),
         };
       });
   } catch {
@@ -165,11 +182,13 @@ export async function prewarmEpisodeAudioVariants(
     const streams = await getEmbeddedAudioStreamIndexes(fullVideoPath).catch(() => []);
 
     // Only prewarm tracks that are not browser-safe to keep CPU usage low.
-    const unsupportedStreams = streams
-      .filter(track => !track.browserSupported)
-      .slice(0, maxTracksPerEpisode);
+    // JP tracks are prioritized; if JP fails/missing, other languages are used.
+    const unsupportedStreams = streams.filter(track => !track.browserSupported);
+    const jpUnsupported = unsupportedStreams.filter(track => isJapaneseLanguage(track.language));
+    const nonJpUnsupported = unsupportedStreams.filter(track => !isJapaneseLanguage(track.language));
+    const orderedCandidates = [...jpUnsupported, ...nonJpUnsupported].slice(0, maxTracksPerEpisode);
 
-    for (const track of unsupportedStreams) {
+    for (const track of orderedCandidates) {
       const key = `${episode.id}:${track.streamIndex}`;
       if (inFlightPrewarm.has(key)) continue;
 
@@ -180,6 +199,7 @@ export async function prewarmEpisodeAudioVariants(
         console.warn('[Prewarm][AudioVariant] Failed:', {
           episodeId: episode.id,
           streamIndex: track.streamIndex,
+          language: track.language,
           codec: track.codec,
           error: error?.message || String(error),
         });
