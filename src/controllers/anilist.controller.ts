@@ -15,15 +15,23 @@ export async function proxyAnilist(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  const payload = JSON.stringify({ query, variables: variables ?? {} });
+
   try {
+    // AniList may reject requests that don't look like they come from a
+    // browser. Include Origin / Referer so Cloudflare's bot-protection
+    // (which sits in front of graphql.anilist.co) lets us through.
     const upstream = await fetch(ANILIST_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
-        'User-Agent': 'AniMind/1.0 (https://fnxdoom.in)',
+        'Origin': 'https://anilist.co',
+        'Referer': 'https://anilist.co/',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       },
-      body: JSON.stringify({ query, variables: variables ?? {} }),
+      body: payload,
     });
 
     const contentType = upstream.headers.get('content-type') ?? '';
@@ -32,7 +40,10 @@ export async function proxyAnilist(req: Request, res: Response): Promise<void> {
       : await upstream.text();
 
     if (!upstream.ok) {
-      console.warn(`[anilist-proxy] AniList returned ${upstream.status}:`, JSON.stringify(body).slice(0, 300));
+      console.warn(
+        `[anilist-proxy] AniList returned ${upstream.status}:`,
+        JSON.stringify(body).slice(0, 500),
+      );
     }
 
     res.status(upstream.status).json(body);
