@@ -21,6 +21,7 @@ export async function proxyAnilist(req: Request, res: Response): Promise<void> {
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
+        'User-Agent': 'AniMind/1.0 (https://fnxdoom.in)',
       },
       body: JSON.stringify({ query, variables: variables ?? {} }),
     });
@@ -29,6 +30,10 @@ export async function proxyAnilist(req: Request, res: Response): Promise<void> {
     const body = contentType.includes('application/json')
       ? await upstream.json()
       : await upstream.text();
+
+    if (!upstream.ok) {
+      console.warn(`[anilist-proxy] AniList returned ${upstream.status}:`, JSON.stringify(body).slice(0, 300));
+    }
 
     res.status(upstream.status).json(body);
   } catch (error: unknown) {
