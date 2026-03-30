@@ -4,17 +4,23 @@ import { streamEpisode, getEpisodeSubtitles, getEpisodeStreamTicket, getEpisodeA
 import { rescanLibrary, storageWebhook } from '../controllers/scanner.controller.js';
 import { listUsers, setAdminStatus, deleteShow, triggerAdminScan } from '../controllers/admin.controller.js';
 import { deleteMyAccount } from '../controllers/account.controller.js';
+import { proxyAnilist } from '../controllers/anilist.controller.js';
+import { signUpWithServiceRole } from '../controllers/auth.controller.js';
 import { requireAuth, requireAdmin, AuthRequest } from '../middleware/auth.middleware.js';
 import { createIpRateLimiter } from '../middleware/rateLimit.middleware.js';
 
 const router = Router();
 const rescanRateLimit = createIpRateLimiter(3, 60 * 1000);
 const webhookRateLimit = createIpRateLimiter(30, 60 * 1000);
+const signupRateLimit = createIpRateLimiter(10, 60 * 1000);
+const anilistRateLimit = createIpRateLimiter(30, 60 * 1000);
 
 // ── Public (no auth required) ────────────────────────────────────────────────
 // Shows — frontend fetches these for the "My Cloud Shows" view
 router.get('/shows', getShows);
 router.get('/shows/:id', getShowById);
+router.post('/auth/signup', signupRateLimit as any, signUpWithServiceRole);
+router.post('/anilist', anilistRateLimit as any, proxyAnilist);
 
 // Manual library rescan — called by "Scan Cloud Storage" button in App.tsx
 router.post('/rescan', rescanRateLimit as any, requireAuth as any, requireAdmin as any, rescanLibrary);
