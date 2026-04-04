@@ -284,7 +284,7 @@ async function getOrCreateAudioVariant(
       '-map', `0:${audioTrackIndex}`,
       '-c:v', 'copy',
       '-c:a', 'aac',
-      '-b:a', '192k',
+      '-b:a', '320k',
       '-movflags', '+faststart',
       outputPath,
     ]).catch(() => null);

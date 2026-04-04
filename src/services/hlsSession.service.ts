@@ -167,7 +167,7 @@ export async function createSession(
     '-map', '0:v:0',
     '-map', `0:${audioTrackIndex}`,
     '-c:v', 'copy',
-    ...(browserSafe ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
+    ...(browserSafe ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '320k']),
     '-f', 'hls',
     '-hls_time', String(segDuration),
     '-hls_list_size', '0',
