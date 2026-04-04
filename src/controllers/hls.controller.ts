@@ -111,13 +111,20 @@ export async function serveHlsPlaylist(req: Request, res: Response) {
 
   try {
     const content = await getPlaylist(sessionId);
-    if (!content) {
-      res.status(404).json({ error: 'Playlist not ready yet.' });
-      return;
-    }
 
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Cache-Control', 'no-cache, no-store');
+
+    if (!content) {
+      // Playlist not ready yet — serve a minimal EVENT playlist so hls.js
+      // polls for updates instead of treating it as a fatal error.
+      const segDuration = Math.max(2, Math.min(30, env.HLS_SEGMENT_DURATION));
+      res.send(
+        `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${segDuration}\n#EXT-X-PLAYLIST-TYPE:EVENT\n`
+      );
+      return;
+    }
+
     res.send(content);
   } catch (err: any) {
     console.error('[HLS] Playlist serve error:', err.message);
@@ -146,7 +153,7 @@ export async function serveHlsSegment(req: Request, res: Response) {
 
     const stats = await stat(segPath);
 
-    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Length', stats.size);
     res.setHeader('Cache-Control', 'no-cache, no-store');
 
