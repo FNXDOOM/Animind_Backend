@@ -1,0 +1,212 @@
+/**
+ * hls.controller.ts
+ *
+ * HTTP endpoints for HLS segmented streaming.
+ * Sessions are created when a user needs a non-default or non-browser-safe
+ * audio track. The frontend uses hls.js to consume the playlist and segments.
+ */
+
+import { Request, Response } from 'express';
+import { createReadStream } from 'fs';
+import { stat } from 'fs/promises';
+import { supabase } from '../config/db.js';
+import {
+  createSession,
+  getPlaylist,
+  getSegmentPath,
+  seekSession,
+  destroySession,
+  hasSession,
+} from '../services/hlsSession.service.js';
+import { getStreamInfo } from '../services/stream.service.js';
+import { env } from '../config/env.js';
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+async function verifyBearerAuth(authHeader?: string): Promise<string | null> {
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+  if (!token) return null;
+
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data.user) return null;
+  return data.user.id;
+}
+
+// ── Endpoints ────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/episodes/:id/hls-session
+ * Body: { audioTrackIndex: number, startTime?: number }
+ * Returns: { sessionId, playlistUrl }
+ */
+export async function createHlsSessionHandler(req: Request, res: Response) {
+  const userId = await verifyBearerAuth(req.headers.authorization);
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const { id } = req.params;
+  const { audioTrackIndex, startTime } = req.body as {
+    audioTrackIndex?: number;
+    startTime?: number;
+  };
+
+  if (typeof audioTrackIndex !== 'number' || !Number.isFinite(audioTrackIndex)) {
+    res.status(400).json({ error: 'audioTrackIndex is required and must be a number.' });
+    return;
+  }
+
+  // Fetch episode
+  const { data: episode, error } = await supabase
+    .from('episodes')
+    .select('id, file_path, bucket_name')
+    .eq('id', id)
+    .single();
+
+  if (error || !episode) {
+    res.status(404).json({ error: 'Episode not found.' });
+    return;
+  }
+
+  // HLS only supported for local storage
+  if (env.STORAGE_MODE !== 'local') {
+    res.status(400).json({ error: 'HLS streaming is only supported in local storage mode.' });
+    return;
+  }
+
+  try {
+    const streamInfo = await getStreamInfo(episode.file_path, episode.bucket_name);
+    if (streamInfo.type !== 'proxy') {
+      res.status(400).json({ error: 'HLS streaming requires local storage.' });
+      return;
+    }
+
+    const sourcePath = streamInfo.url;
+    const safeStartTime = typeof startTime === 'number' && Number.isFinite(startTime) ? Math.max(0, startTime) : 0;
+
+    const result = await createSession(sourcePath, id, audioTrackIndex, safeStartTime);
+
+    res.json({
+      sessionId: result.sessionId,
+      playlistUrl: result.playlistUrl,
+    });
+  } catch (err: any) {
+    console.error('[HLS] Session creation failed:', err.message);
+    res.status(500).json({ error: 'Failed to create HLS session.' });
+  }
+}
+
+/**
+ * GET /api/hls/:sessionId/playlist.m3u8
+ * Serves the live HLS playlist.
+ */
+export async function serveHlsPlaylist(req: Request, res: Response) {
+  const { sessionId } = req.params;
+
+  if (!hasSession(sessionId)) {
+    res.status(404).json({ error: 'HLS session not found or expired.' });
+    return;
+  }
+
+  try {
+    const content = await getPlaylist(sessionId);
+    if (!content) {
+      res.status(404).json({ error: 'Playlist not ready yet.' });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-cache, no-store');
+    res.send(content);
+  } catch (err: any) {
+    console.error('[HLS] Playlist serve error:', err.message);
+    res.status(500).json({ error: 'Failed to serve playlist.' });
+  }
+}
+
+/**
+ * GET /api/hls/:sessionId/:segment
+ * Serves an individual .ts segment file.
+ */
+export async function serveHlsSegment(req: Request, res: Response) {
+  const { sessionId, segment } = req.params;
+
+  if (!hasSession(sessionId)) {
+    res.status(404).json({ error: 'HLS session not found or expired.' });
+    return;
+  }
+
+  try {
+    const segPath = await getSegmentPath(sessionId, segment);
+    if (!segPath) {
+      res.status(404).json({ error: 'Segment not found.' });
+      return;
+    }
+
+    const stats = await stat(segPath);
+
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Content-Length', stats.size);
+    res.setHeader('Cache-Control', 'no-cache, no-store');
+
+    createReadStream(segPath).pipe(res);
+  } catch (err: any) {
+    console.error('[HLS] Segment serve error:', err.message);
+    res.status(500).json({ error: 'Failed to serve segment.' });
+  }
+}
+
+/**
+ * POST /api/hls/:sessionId/seek
+ * Body: { time: number }
+ * Restarts ffmpeg from the specified time position.
+ */
+export async function seekHlsSessionHandler(req: Request, res: Response) {
+  const userId = await verifyBearerAuth(req.headers.authorization);
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const { sessionId } = req.params;
+  const { time } = req.body as { time?: number };
+
+  if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) {
+    res.status(400).json({ error: 'time is required and must be a non-negative number.' });
+    return;
+  }
+
+  if (!hasSession(sessionId)) {
+    res.status(404).json({ error: 'HLS session not found or expired.' });
+    return;
+  }
+
+  try {
+    const success = await seekSession(sessionId, time);
+    if (!success) {
+      res.status(500).json({ error: 'Failed to seek.' });
+      return;
+    }
+    res.json({ success: true, seekedTo: time });
+  } catch (err: any) {
+    console.error('[HLS] Seek failed:', err.message);
+    res.status(500).json({ error: 'Failed to seek.' });
+  }
+}
+
+/**
+ * DELETE /api/hls/:sessionId
+ * Destroys a session — kills ffmpeg and cleans up temp files.
+ */
+export async function destroyHlsSessionHandler(req: Request, res: Response) {
+  const { sessionId } = req.params;
+
+  try {
+    await destroySession(sessionId);
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('[HLS] Destroy failed:', err.message);
+    res.status(500).json({ error: 'Failed to destroy session.' });
+  }
+}

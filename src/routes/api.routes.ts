@@ -6,6 +6,10 @@ import { listUsers, setAdminStatus, deleteShow, triggerAdminScan } from '../cont
 import { deleteMyAccount } from '../controllers/account.controller.js';
 import { proxyAnilist } from '../controllers/anilist.controller.js';
 import { signUpWithServiceRole } from '../controllers/auth.controller.js';
+import {
+  createHlsSessionHandler, serveHlsPlaylist, serveHlsSegment,
+  seekHlsSessionHandler, destroyHlsSessionHandler,
+} from '../controllers/hls.controller.js';
 import { requireAuth, requireAdmin, AuthRequest } from '../middleware/auth.middleware.js';
 import { createIpRateLimiter } from '../middleware/rateLimit.middleware.js';
 
@@ -35,6 +39,13 @@ router.get('/episodes/:id/stream', streamEpisode);
 router.get('/episodes/:id/subtitles', requireAuth as any, getEpisodeSubtitles);
 router.get('/episodes/:id/audio-tracks', requireAuth as any, getEpisodeAudioTracks);
 router.delete('/account', requireAuth as any, deleteMyAccount as any);
+
+// ── HLS Segmented Streaming ─────────────────────────────────────────────────
+router.post('/episodes/:id/hls-session', requireAuth as any, createHlsSessionHandler);
+router.get('/hls/:sessionId/playlist.m3u8', serveHlsPlaylist);
+router.get('/hls/:sessionId/:segment', serveHlsSegment);
+router.post('/hls/:sessionId/seek', requireAuth as any, seekHlsSessionHandler);
+router.delete('/hls/:sessionId', destroyHlsSessionHandler);
 
 // ── Admin-only ───────────────────────────────────────────────────────────────
 router.get('/admin/users', requireAuth as any, requireAdmin as any, listUsers);

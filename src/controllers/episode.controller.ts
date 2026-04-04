@@ -772,11 +772,16 @@ export async function getEpisodeStreamTicket(req: Request, res: Response) {
     return;
   }
 
+  // When an audio track is explicitly selected, tell the frontend to use HLS
+  // segmented streaming instead of the legacy full-file remux approach.
+  const hlsRequired = typeof selectedAudioTrackIndex === 'number';
+
   const ticket = createStreamTicket(id, selectedAudioTrackIndex);
   const audioQuery = typeof selectedAudioTrackIndex === 'number' ? `&at=${selectedAudioTrackIndex}` : '';
   res.json({
     url: `/api/episodes/${encodeURIComponent(id)}/stream?st=${encodeURIComponent(ticket)}${audioQuery}`,
     expiresIn: STREAM_TICKET_TTL_SECONDS,
+    hlsRequired,
   });
 }
 

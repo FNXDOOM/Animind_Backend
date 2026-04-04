@@ -5,6 +5,8 @@ import { env } from './config/env.js';
 import { initSyncPlay } from './sockets/syncplay.handler.js';
 import { runScan } from './services/scanner.service.js';
 import { cleanupEndedWatchParties } from './services/syncplayCleanup.service.js';
+import { destroyAllSessions } from './services/hlsSession.service.js';
+import { cleanupLegacyAudioCache } from './services/audioCacheCleanup.service.js';
 
 // ── HTTP Server ───────────────────────────────────────────────────────────────
 const httpServer = http.createServer(app);
@@ -58,6 +60,15 @@ if (env.SYNCPLAY_ENDED_CLEANUP_ENABLED) {
   }
 }
 
+// ── Legacy Audio Cache Cleanup ────────────────────────────────────────────────
+if (env.AUDIO_CACHE_CLEANUP_ON_STARTUP) {
+  void cleanupLegacyAudioCache().then(result => {
+    if (result.deleted) {
+      console.log(`[Server] ${result.message}`);
+    }
+  });
+}
+
 // ── Start ──────────────────────────────────────────────────────────────────────
 httpServer.listen(env.PORT, () => {
   console.log(`\n🚀 Animind Backend running on port ${env.PORT}`);
@@ -68,13 +79,15 @@ httpServer.listen(env.PORT, () => {
 });
 
 // ── Graceful shutdown ──────────────────────────────────────────────────────────
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('[Server] SIGTERM received, shutting down...');
+  await destroyAllSessions();
   httpServer.close(() => process.exit(0));
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('[Server] SIGINT received, shutting down...');
+  await destroyAllSessions();
   httpServer.close(() => process.exit(0));
 });
 

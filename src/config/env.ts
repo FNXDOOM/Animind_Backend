@@ -36,7 +36,7 @@ export const env = {
   VIDEO_EXTENSIONS: (process.env.VIDEO_EXTENSIONS ?? 'mkv,mp4,avi,webm,m4v')
     .split(',')
     .map(e => e.trim().toLowerCase()),
-  POST_SCAN_AUDIO_PREWARM_ENABLED: process.env.POST_SCAN_AUDIO_PREWARM_ENABLED !== 'false',
+  POST_SCAN_AUDIO_PREWARM_ENABLED: process.env.POST_SCAN_AUDIO_PREWARM_ENABLED === 'true',
   POST_SCAN_AUDIO_PREWARM_EPISODE_LIMIT: parseInt(process.env.POST_SCAN_AUDIO_PREWARM_EPISODE_LIMIT ?? '12', 10),
   POST_SCAN_AUDIO_PREWARM_MAX_TRACKS_PER_EPISODE: parseInt(process.env.POST_SCAN_AUDIO_PREWARM_MAX_TRACKS_PER_EPISODE ?? '1', 10),
 
@@ -55,4 +55,12 @@ export const env = {
 
   // AniList
   ANILIST_ENABLED: process.env.ANILIST_ENABLED !== 'false',
+
+  // HLS Streaming
+  HLS_SEGMENT_DURATION: parseInt(process.env.HLS_SEGMENT_DURATION ?? '6', 10),
+  HLS_MAX_CONCURRENT_SESSIONS: parseInt(process.env.HLS_MAX_CONCURRENT_SESSIONS ?? '2', 10),
+  HLS_SESSION_TIMEOUT_MINUTES: parseInt(process.env.HLS_SESSION_TIMEOUT_MINUTES ?? '30', 10),
+
+  // Legacy audio cache cleanup
+  AUDIO_CACHE_CLEANUP_ON_STARTUP: process.env.AUDIO_CACHE_CLEANUP_ON_STARTUP !== 'false',
 };
