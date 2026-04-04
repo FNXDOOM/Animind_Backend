@@ -108,8 +108,8 @@ async function waitForFirstSegment(playlistPath: string, timeoutMs = 15000): Pro
   while (Date.now() - start < timeoutMs) {
     try {
       const content = await readFile(playlistPath, 'utf-8');
-      // A valid HLS playlist with segments will contain .ts references
-      if (content.includes('.ts') && content.includes('#EXTINF:')) {
+      // A valid HLS playlist with segments will contain .m4s references (fMP4)
+      if (content.includes('.m4s') && content.includes('#EXTINF:')) {
         return;
       }
     } catch {
@@ -126,7 +126,7 @@ async function waitForFirstSegment(playlistPath: string, timeoutMs = 15000): Pro
 /**
  * Create a new HLS streaming session.
  * Starts ffmpeg in the background producing HLS segments.
- * Returns once the first segment is ready (playback can begin).
+ * Returns immediately — hls.js polls the playlist endpoint for segments.
  */
 export async function createSession(
   sourcePath: string,
@@ -150,7 +150,7 @@ export async function createSession(
   await mkdir(sessionDir, { recursive: true });
 
   const playlistPath = path.join(sessionDir, 'playlist.m3u8');
-  const segmentPattern = path.join(sessionDir, 'seg%05d.ts');
+  const segmentPattern = path.join(sessionDir, 'seg%05d.m4s');
 
   // Determine audio encoding strategy
   const codec = await getAudioStreamCodec(sourcePath, audioTrackIndex).catch(() => null);
@@ -161,17 +161,20 @@ export async function createSession(
 
   const ffmpegArgs: string[] = [
     '-v', 'warning',
+    '-threads', '0',
     // Seek to start position if specified
     ...(startTime > 0 ? ['-ss', String(startTime)] : []),
     '-i', sourcePath,
     '-map', '0:v:0',
     '-map', `0:${audioTrackIndex}`,
     '-c:v', 'copy',
-    ...(browserSafe ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '320k']),
+    ...(browserSafe ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
     '-f', 'hls',
     '-hls_time', String(segDuration),
     '-hls_list_size', '0',
     '-hls_playlist_type', 'event',
+    '-hls_segment_type', 'fmp4',
+    '-hls_fmp4_init_filename', 'init.mp4',
     '-hls_flags', 'append_list+temp_file',
     '-hls_segment_filename', segmentPattern,
     '-start_number', '0',
@@ -222,8 +225,13 @@ export async function createSession(
   sessions.set(sessionId, session);
   startCleanupTimer();
 
-  // Wait for the first segment before returning so the client can start playing
-  await readyPromise;
+  // Don't block — return immediately and let hls.js poll the playlist endpoint.
+  // The readyPromise is stored on the session for seek operations that need to wait.
+  readyPromise.catch(() => {
+    // If ffmpeg fails to produce first segment, log but don't crash — the
+    // playlist endpoint will return an empty live playlist and hls.js will retry.
+    console.error(`[HLS][${sessionId.slice(0, 8)}] ffmpeg failed to produce first segment`);
+  });
 
   console.log(`[HLS] Session ${sessionId.slice(0, 8)} created for episode ${episodeId} (audio track ${audioTrackIndex}, codec: ${codec ?? 'unknown'}, ${browserSafe ? 'copy' : 'transcode'})`);
 
@@ -260,7 +268,7 @@ export async function getSegmentPath(sessionId: string, segmentName: string): Pr
 
   // Sanitize segment name to prevent path traversal
   const safeName = path.basename(segmentName);
-  if (!safeName.endsWith('.ts')) return null;
+  if (!safeName.endsWith('.m4s') && safeName !== 'init.mp4') return null;
 
   const segmentPath = path.join(session.dir, safeName);
 
@@ -291,7 +299,7 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
   try {
     const files = await readdir(session.dir);
     for (const file of files) {
-      if (file.endsWith('.ts') || file.endsWith('.m3u8') || file.endsWith('.tmp')) {
+      if (file.endsWith('.m4s') || file.endsWith('.m3u8') || file.endsWith('.tmp') || file === 'init.mp4') {
         await rm(path.join(session.dir, file), { force: true });
       }
     }
@@ -302,10 +310,11 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
   // Restart ffmpeg from new position
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
   const segDuration = Math.max(2, Math.min(30, env.HLS_SEGMENT_DURATION));
-  const segmentPattern = path.join(session.dir, 'seg%05d.ts');
+  const segmentPattern = path.join(session.dir, 'seg%05d.m4s');
 
   const ffmpegArgs: string[] = [
     '-v', 'warning',
+    '-threads', '0',
     '-ss', String(Math.max(0, timeSeconds)),
     '-i', session.sourcePath,
     '-map', '0:v:0',
@@ -316,6 +325,8 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
     '-hls_time', String(segDuration),
     '-hls_list_size', '0',
     '-hls_playlist_type', 'event',
+    '-hls_segment_type', 'fmp4',
+    '-hls_fmp4_init_filename', 'init.mp4',
     '-hls_flags', 'append_list+temp_file',
     '-hls_segment_filename', segmentPattern,
     '-start_number', '0',

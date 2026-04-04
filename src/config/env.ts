@@ -57,7 +57,7 @@ export const env = {
   ANILIST_ENABLED: process.env.ANILIST_ENABLED !== 'false',
 
   // HLS Streaming
-  HLS_SEGMENT_DURATION: parseInt(process.env.HLS_SEGMENT_DURATION ?? '6', 10),
+  HLS_SEGMENT_DURATION: parseInt(process.env.HLS_SEGMENT_DURATION ?? '2', 10),
   HLS_MAX_CONCURRENT_SESSIONS: parseInt(process.env.HLS_MAX_CONCURRENT_SESSIONS ?? '2', 10),
   HLS_SESSION_TIMEOUT_MINUTES: parseInt(process.env.HLS_SESSION_TIMEOUT_MINUTES ?? '30', 10),
 
