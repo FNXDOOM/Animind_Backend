@@ -225,13 +225,10 @@ export async function createSession(
   sessions.set(sessionId, session);
   startCleanupTimer();
 
-  // Don't block — return immediately and let hls.js poll the playlist endpoint.
-  // The readyPromise is stored on the session for seek operations that need to wait.
-  readyPromise.catch(() => {
-    // If ffmpeg fails to produce first segment, log but don't crash — the
-    // playlist endpoint will return an empty live playlist and hls.js will retry.
-    console.error(`[HLS][${sessionId.slice(0, 8)}] ffmpeg failed to produce first segment`);
-  });
+  // Wait for the first segment before returning — with 2s segments this
+  // blocks for only ~1-2 seconds, and guarantees the playlist is playable
+  // when hls.js first loads it (important for frontends without retry logic).
+  await readyPromise;
 
   console.log(`[HLS] Session ${sessionId.slice(0, 8)} created for episode ${episodeId} (audio track ${audioTrackIndex}, codec: ${codec ?? 'unknown'}, ${browserSafe ? 'copy' : 'transcode'})`);
 
