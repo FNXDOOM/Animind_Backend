@@ -153,7 +153,7 @@ export async function serveHlsSegment(req: Request, res: Response) {
 
     const stats = await stat(segPath);
 
-    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Type', 'video/mp2t');
     res.setHeader('Content-Length', stats.size);
     res.setHeader('Cache-Control', 'no-cache, no-store');
 

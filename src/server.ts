@@ -6,7 +6,7 @@ import { initSyncPlay } from './sockets/syncplay.handler.js';
 import { runScan } from './services/scanner.service.js';
 import { cleanupEndedWatchParties } from './services/syncplayCleanup.service.js';
 import { destroyAllSessions } from './services/hlsSession.service.js';
-import { cleanupLegacyAudioCache } from './services/audioCacheCleanup.service.js';
+import { cleanupAudioVariantCacheByTtl } from './services/audioCacheCleanup.service.js';
 
 // ── HTTP Server ───────────────────────────────────────────────────────────────
 const httpServer = http.createServer(app);
@@ -60,13 +60,34 @@ if (env.SYNCPLAY_ENDED_CLEANUP_ENABLED) {
   }
 }
 
-// ── Legacy Audio Cache Cleanup ────────────────────────────────────────────────
-if (env.AUDIO_CACHE_CLEANUP_ON_STARTUP) {
-  void cleanupLegacyAudioCache().then(result => {
-    if (result.deleted) {
-      console.log(`[Server] ${result.message}`);
+// ── Audio Variant Cache TTL Cleanup ─────────────────────────────────────────
+if (env.AUDIO_CACHE_VARIANT_CLEANUP_ENABLED) {
+  const runAudioVariantCleanup = async () => {
+    try {
+      const result = await cleanupAudioVariantCacheByTtl(env.AUDIO_CACHE_VARIANT_TTL_DAYS);
+      if (result.deletedFiles > 0 || result.deletedDirs > 0 || result.prunedMetadataEntries > 0) {
+        console.log(
+          `[AudioCache Cleanup] Deleted ${result.deletedFiles} file(s), ${result.deletedDirs} dir(s), pruned ${result.prunedMetadataEntries} metadata entr${result.prunedMetadataEntries === 1 ? 'y' : 'ies'}.`
+        );
+      }
+    } catch (err: any) {
+      console.error('[AudioCache Cleanup] Failed:', err.message);
     }
-  });
+  };
+
+  // One immediate pass at startup.
+  void runAudioVariantCleanup();
+
+  if (cron.validate(env.AUDIO_CACHE_VARIANT_CLEANUP_CRON)) {
+    cron.schedule(env.AUDIO_CACHE_VARIANT_CLEANUP_CRON, runAudioVariantCleanup);
+    console.log(
+      `[Server] Audio variant cache cleanup cron scheduled: "${env.AUDIO_CACHE_VARIANT_CLEANUP_CRON}" (TTL ${env.AUDIO_CACHE_VARIANT_TTL_DAYS}d)`
+    );
+  } else {
+    console.warn(
+      `[Server] Invalid AUDIO_CACHE_VARIANT_CLEANUP_CRON expression: "${env.AUDIO_CACHE_VARIANT_CLEANUP_CRON}". Audio cache cleanup cron not scheduled.`
+    );
+  }
 }
 
 // ── Start ──────────────────────────────────────────────────────────────────────
