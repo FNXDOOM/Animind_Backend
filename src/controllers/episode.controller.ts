@@ -49,6 +49,8 @@ let s3Client: S3Client | null = null;
 const STREAM_TICKET_TTL_SECONDS = Math.max(120, env.STREAM_TICKET_TTL_SECONDS);
 const STREAM_RANGE_CHUNK_MB = Number.isFinite(env.STREAM_RANGE_CHUNK_MB) ? env.STREAM_RANGE_CHUNK_MB : 8;
 const STREAM_RANGE_CHUNK_SIZE_BYTES = Math.max(2, Math.min(32, STREAM_RANGE_CHUNK_MB)) * 1024 * 1024;
+// For native clients (ExoPlayer/Android), allow much larger chunks for smooth long-episode playback
+const NATIVE_STREAM_RANGE_CHUNK_SIZE_BYTES = 32 * 1024 * 1024; // 32 MB
 const AUDIO_CACHE_ROOT_DIR = path.resolve(env.LOCAL_STORAGE_PATH, '.animind-audio-cache');
 
 interface StreamTicketPayload {
@@ -779,13 +781,15 @@ export async function streamEpisode(req: Request, res: Response) {
 
     const rangeHeader = req.headers.range;
     const mimeType = shouldBuildAudioVariant ? 'video/mp4' : getMimeType(episode.file_path);
+    // Native clients (ExoPlayer) benefit from larger chunks; browsers use the configured size
+    const effectiveChunkSize = isNativeTicket ? NATIVE_STREAM_RANGE_CHUNK_SIZE_BYTES : STREAM_RANGE_CHUNK_SIZE_BYTES;
 
     if (rangeHeader) {
       const [startStr, endStr] = rangeHeader.replace(/bytes=/, '').split('-');
       const start = parseInt(startStr, 10);
       const end = endStr
         ? parseInt(endStr, 10)
-        : Math.min(start + STREAM_RANGE_CHUNK_SIZE_BYTES - 1, fileSize - 1);
+        : Math.min(start + effectiveChunkSize - 1, fileSize - 1);
 
       if (!Number.isFinite(start) || start < 0 || start >= fileSize) {
         res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
@@ -849,6 +853,8 @@ export async function getEpisodeStreamTicket(req: Request, res: Response) {
   const isNativeApp =
     userAgent.includes('Animind-Desktop') ||
     userAgent.includes('Electron') ||
+    userAgent.includes('okhttp') ||       // Retrofit/OkHttp (Kotlin Android app)
+    userAgent.includes('Animind-Kotlin') ||
     clientTypeParam === 'desktop' ||
     clientTypeParam === 'native';
 
