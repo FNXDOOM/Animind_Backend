@@ -54,7 +54,6 @@ export async function getGoogleAuthUrl(req: Request, res: Response) {
       `?provider=google` +
       `&redirect_to=${encodeURIComponent(redirectUrl)}` +
       `&response_type=token` +
-      `&access_type=offline` +
       `&prompt=select_account`;
 
     res.status(200).json({ url: authorizeUrl, mode });
