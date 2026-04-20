@@ -108,8 +108,8 @@ async function waitForFirstSegment(playlistPath: string, timeoutMs = 15000): Pro
   while (Date.now() - start < timeoutMs) {
     try {
       const content = await readFile(playlistPath, 'utf-8');
-      // A valid HLS playlist with segments will contain .m4s references (fMP4)
-      if (content.includes('.m4s') && content.includes('#EXTINF:')) {
+      // A valid HLS playlist with segments will contain .ts entries.
+      if (content.includes('.ts') && content.includes('#EXTINF:')) {
         return;
       }
     } catch {
@@ -150,7 +150,7 @@ export async function createSession(
   await mkdir(sessionDir, { recursive: true });
 
   const playlistPath = path.join(sessionDir, 'playlist.m3u8');
-  const segmentPattern = path.join(sessionDir, 'seg%05d.m4s');
+  const segmentPattern = path.join(sessionDir, 'seg%05d.ts');
 
   // Determine audio encoding strategy
   const codec = await getAudioStreamCodec(sourcePath, audioTrackIndex).catch(() => null);
@@ -173,8 +173,7 @@ export async function createSession(
     '-hls_time', String(segDuration),
     '-hls_list_size', '0',
     '-hls_playlist_type', 'event',
-    '-hls_segment_type', 'fmp4',
-    '-hls_fmp4_init_filename', 'init.mp4',
+    '-hls_segment_type', 'mpegts',
     '-hls_flags', 'append_list+temp_file',
     '-hls_segment_filename', segmentPattern,
     '-start_number', '0',
@@ -265,7 +264,7 @@ export async function getSegmentPath(sessionId: string, segmentName: string): Pr
 
   // Sanitize segment name to prevent path traversal
   const safeName = path.basename(segmentName);
-  if (!safeName.endsWith('.m4s') && safeName !== 'init.mp4') return null;
+  if (!safeName.endsWith('.ts')) return null;
 
   const segmentPath = path.join(session.dir, safeName);
 
@@ -296,7 +295,7 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
   try {
     const files = await readdir(session.dir);
     for (const file of files) {
-      if (file.endsWith('.m4s') || file.endsWith('.m3u8') || file.endsWith('.tmp') || file === 'init.mp4') {
+      if (file.endsWith('.ts') || file.endsWith('.m3u8') || file.endsWith('.tmp')) {
         await rm(path.join(session.dir, file), { force: true });
       }
     }
@@ -307,7 +306,7 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
   // Restart ffmpeg from new position
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
   const segDuration = Math.max(2, Math.min(30, env.HLS_SEGMENT_DURATION));
-  const segmentPattern = path.join(session.dir, 'seg%05d.m4s');
+  const segmentPattern = path.join(session.dir, 'seg%05d.ts');
 
   const ffmpegArgs: string[] = [
     '-v', 'warning',
@@ -322,8 +321,7 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
     '-hls_time', String(segDuration),
     '-hls_list_size', '0',
     '-hls_playlist_type', 'event',
-    '-hls_segment_type', 'fmp4',
-    '-hls_fmp4_init_filename', 'init.mp4',
+    '-hls_segment_type', 'mpegts',
     '-hls_flags', 'append_list+temp_file',
     '-hls_segment_filename', segmentPattern,
     '-start_number', '0',

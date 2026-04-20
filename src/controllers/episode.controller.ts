@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { createReadStream } from 'fs';
-import { stat, readFile, readdir, mkdir } from 'fs/promises';
+import { stat, readFile, readdir, mkdir, writeFile } from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import { spawn } from 'child_process';
@@ -23,6 +23,24 @@ interface AudioTrackPayload {
   streamIndex: number;
   codec?: string;
   browserSupported?: boolean;
+  cached?: boolean;
+  cacheMode?: 'copy' | 'transcode';
+}
+
+interface AudioCacheTrackEntry {
+  streamIndex: number;
+  codec?: string;
+  browserSafe: boolean;
+  mode: 'copy' | 'transcode';
+  sourceSignature: string;
+  variantPath: string;
+  updatedAt: string;
+  size: number;
+}
+
+interface AudioCacheMetadata {
+  episodeId: string;
+  tracks: AudioCacheTrackEntry[];
 }
 
 const SUBTITLE_EXTENSIONS = ['.vtt', '.srt'];
@@ -31,10 +49,12 @@ let s3Client: S3Client | null = null;
 const STREAM_TICKET_TTL_SECONDS = Math.max(120, env.STREAM_TICKET_TTL_SECONDS);
 const STREAM_RANGE_CHUNK_MB = Number.isFinite(env.STREAM_RANGE_CHUNK_MB) ? env.STREAM_RANGE_CHUNK_MB : 8;
 const STREAM_RANGE_CHUNK_SIZE_BYTES = Math.max(2, Math.min(32, STREAM_RANGE_CHUNK_MB)) * 1024 * 1024;
+const AUDIO_CACHE_ROOT_DIR = path.resolve(env.LOCAL_STORAGE_PATH, '.animind-audio-cache');
 
 interface StreamTicketPayload {
   episodeId: string;
   at?: number;
+  cm: 'n' | 'b';
   exp: number;
 }
 
@@ -53,10 +73,15 @@ function signTicketPart(payloadPart: string): string {
     .digest('base64url');
 }
 
-function createStreamTicket(episodeId: string, audioTrackIndex?: number): string {
+function createStreamTicket(
+  episodeId: string,
+  audioTrackIndex?: number,
+  clientMode: 'n' | 'b' = 'b'
+): string {
   const payload: StreamTicketPayload = {
     episodeId,
     ...(typeof audioTrackIndex === 'number' ? { at: audioTrackIndex } : {}),
+    cm: clientMode,
     exp: Date.now() + STREAM_TICKET_TTL_SECONDS * 1000,
   };
   const payloadPart = toBase64Url(JSON.stringify(payload));
@@ -64,9 +89,9 @@ function createStreamTicket(episodeId: string, audioTrackIndex?: number): string
   return `${payloadPart}.${signaturePart}`;
 }
 
-function verifyStreamTicket(ticket: string, episodeId: string): boolean {
+function verifyStreamTicket(ticket: string, episodeId: string): StreamTicketPayload | null {
   const parts = ticket.split('.');
-  if (parts.length !== 2) return false;
+  if (parts.length !== 2) return null;
 
   const [payloadPart, signaturePart] = parts;
   const expectedSignaturePart = signTicketPart(payloadPart);
@@ -75,17 +100,17 @@ function verifyStreamTicket(ticket: string, episodeId: string): boolean {
     const provided = Buffer.from(signaturePart);
     const expected = Buffer.from(expectedSignaturePart);
     if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
-      return false;
+      return null;
     }
 
     const payload = JSON.parse(fromBase64Url(payloadPart)) as StreamTicketPayload;
     if (!payload || payload.episodeId !== episodeId || payload.exp <= Date.now()) {
-      return false;
+      return null;
     }
 
-    return true;
+    return payload;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -236,21 +261,79 @@ async function getOrCreateAudioVariant(
   episodeId: string,
   audioTrackIndex: number
 ): Promise<string> {
+  const episodeCacheDir = path.join(AUDIO_CACHE_ROOT_DIR, episodeId);
+  const metadataPath = path.join(episodeCacheDir, 'metadata.json');
+
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
   const codec = await getAudioStreamCodec(sourcePath, audioTrackIndex).catch(() => null);
-  const preferCopyAudio = isBrowserSafeAudioCodec(codec ?? undefined);
+  const browserSafe = isBrowserSafeAudioCodec(codec ?? undefined);
+  const preferredMode: 'copy' | 'transcode' = browserSafe ? 'copy' : 'transcode';
 
   const sourceStat = await stat(sourcePath);
-  const sourceSignature = `${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}:${audioTrackIndex}:${preferCopyAudio ? 'copy' : 'aac'}`;
-  const variantHash = crypto.createHash('sha1').update(sourceSignature).digest('hex').slice(0, 12);
-  const cacheDir = path.resolve(env.LOCAL_STORAGE_PATH, '.animind-audio-cache');
-  const outputPath = path.join(cacheDir, `${episodeId}-a${audioTrackIndex}-${variantHash}.mp4`);
+  const sourceSignature = `${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}:${audioTrackIndex}`;
+  const variantSignature = `${sourceSignature}:${preferredMode}`;
+  const variantHash = crypto.createHash('sha1').update(variantSignature).digest('hex').slice(0, 12);
+  const variantFileName = `a${audioTrackIndex}-${preferredMode}-${variantHash}.mp4`;
+  const outputPath = path.join(episodeCacheDir, variantFileName);
 
-  await mkdir(cacheDir, { recursive: true });
+  await mkdir(episodeCacheDir, { recursive: true });
+
+  const readMetadata = async (): Promise<AudioCacheMetadata> => {
+    try {
+      const raw = await readFile(metadataPath, 'utf-8');
+      const parsed = JSON.parse(raw) as AudioCacheMetadata;
+      if (parsed && parsed.episodeId === episodeId && Array.isArray(parsed.tracks)) {
+        return parsed;
+      }
+    } catch {
+      // Cache metadata missing or invalid.
+    }
+    return { episodeId, tracks: [] };
+  };
+
+  const writeMetadata = async (meta: AudioCacheMetadata): Promise<void> => {
+    await writeFile(metadataPath, JSON.stringify(meta, null, 2), 'utf-8');
+  };
+
+  const metadata = await readMetadata();
+  const existing = metadata.tracks.find(track =>
+    track.streamIndex === audioTrackIndex
+    && track.sourceSignature === sourceSignature
+    && track.mode === preferredMode
+  );
+
+  if (existing?.variantPath) {
+    const existingPath = path.join(episodeCacheDir, existing.variantPath);
+    try {
+      const cached = await stat(existingPath);
+      if (cached.size > 0) {
+        return existingPath;
+      }
+    } catch {
+      // Stale metadata entry; rebuild below.
+    }
+  }
 
   try {
     const cached = await stat(outputPath);
     if (cached.size > 0) {
+      const nextMeta: AudioCacheMetadata = {
+        episodeId,
+        tracks: [
+          ...metadata.tracks.filter(t => t.streamIndex !== audioTrackIndex),
+          {
+            streamIndex: audioTrackIndex,
+            codec: codec ?? undefined,
+            browserSafe,
+            mode: preferredMode,
+            sourceSignature,
+            variantPath: variantFileName,
+            updatedAt: new Date().toISOString(),
+            size: cached.size,
+          },
+        ],
+      };
+      await writeMetadata(nextMeta);
       return outputPath;
     }
   } catch {
@@ -260,7 +343,7 @@ async function getOrCreateAudioVariant(
   let result: { code: number; stdout: string; stderr: string } | null = null;
 
   // Copy audio only when codec is known browser-safe; otherwise transcode directly to AAC.
-  if (preferCopyAudio) {
+  if (browserSafe) {
     result = await runProcess(ffmpegBin, [
       '-y',
       '-v', 'error',
@@ -284,7 +367,7 @@ async function getOrCreateAudioVariant(
       '-map', `0:${audioTrackIndex}`,
       '-c:v', 'copy',
       '-c:a', 'aac',
-      '-b:a', '320k',
+      '-b:a', '192k',
       '-movflags', '+faststart',
       outputPath,
     ]).catch(() => null);
@@ -295,7 +378,41 @@ async function getOrCreateAudioVariant(
     throw new Error(stderr);
   }
 
+  const built = await stat(outputPath);
+  const finalMode: 'copy' | 'transcode' = browserSafe && result.code === 0 ? preferredMode : 'transcode';
+  const nextMeta: AudioCacheMetadata = {
+    episodeId,
+    tracks: [
+      ...metadata.tracks.filter(t => t.streamIndex !== audioTrackIndex),
+      {
+        streamIndex: audioTrackIndex,
+        codec: codec ?? undefined,
+        browserSafe,
+        mode: finalMode,
+        sourceSignature,
+        variantPath: variantFileName,
+        updatedAt: new Date().toISOString(),
+        size: built.size,
+      },
+    ],
+  };
+  await writeMetadata(nextMeta);
+
   return outputPath;
+}
+
+async function getAudioCacheMetadata(episodeId: string): Promise<AudioCacheMetadata | null> {
+  const metadataPath = path.join(AUDIO_CACHE_ROOT_DIR, episodeId, 'metadata.json');
+  try {
+    const raw = await readFile(metadataPath, 'utf-8');
+    const parsed = JSON.parse(raw) as AudioCacheMetadata;
+    if (!parsed || parsed.episodeId !== episodeId || !Array.isArray(parsed.tracks)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 async function getEmbeddedSubtitleTracks(fullVideoPath: string): Promise<SubtitleTrackPayload[]> {
@@ -601,12 +718,15 @@ export async function streamEpisode(req: Request, res: Response) {
 
   const streamTicket = typeof req.query.st === 'string' ? req.query.st : undefined;
   const hasValidBearer = await verifyBearerAuth(req.headers.authorization);
-  const hasValidTicket = !!streamTicket && verifyStreamTicket(streamTicket, id);
+  const ticketPayload = streamTicket ? verifyStreamTicket(streamTicket, id) : null;
+  const hasValidTicket = !!ticketPayload;
 
   if (!hasValidBearer && !hasValidTicket) {
     res.status(401).json({ error: 'Missing or invalid stream authorization.' });
     return;
   }
+
+  const isNativeTicket = ticketPayload?.cm === 'n';
 
   // 1. Fetch episode record
   const { data: episode, error } = await supabase
@@ -637,62 +757,14 @@ export async function streamEpisode(req: Request, res: Response) {
 
     // ── Local: HTTP Range-Request streaming ──────────────────────────────────
     let filePath = streamInfo.url;
-    if (selectedAudioTrackIndex !== null) {
+    const shouldBuildAudioVariant = !isNativeTicket && selectedAudioTrackIndex !== null;
+    if (shouldBuildAudioVariant) {
       try {
         filePath = await getOrCreateAudioVariant(filePath, id, selectedAudioTrackIndex);
       } catch (variantError: any) {
-        console.warn('[Stream][AudioVariant] Selected track failed, attempting fallback:', variantError?.message || variantError);
-
-        const availableTracks = await getEmbeddedAudioTracks(filePath).catch(() => []);
-        const selectedTrack = availableTracks.find(track => track.streamIndex === selectedAudioTrackIndex);
-        const selectedIsJapanese = isJapaneseLanguage(selectedTrack?.language);
-
-        const fallbackCandidates = availableTracks
-          .filter(track => track.streamIndex !== selectedAudioTrackIndex)
-          .sort((a, b) => {
-            const aSafe = a.browserSupported ? 1 : 0;
-            const bSafe = b.browserSupported ? 1 : 0;
-            return bSafe - aSafe;
-          });
-
-        const primaryFallbackOrder = selectedIsJapanese
-          ? fallbackCandidates.filter(track => !isJapaneseLanguage(track.language))
-          : fallbackCandidates;
-
-        const tried = new Set<number>();
-        let fallbackPath: string | null = null;
-
-        for (const track of primaryFallbackOrder) {
-          tried.add(track.streamIndex);
-          try {
-            fallbackPath = await getOrCreateAudioVariant(filePath, id, track.streamIndex);
-            console.warn(`[Stream][AudioVariant] Fallback track selected: #${track.streamIndex} (${track.language})`);
-            break;
-          } catch {
-            // Try next fallback track.
-          }
-        }
-
-        if (!fallbackPath) {
-          for (const track of fallbackCandidates) {
-            if (tried.has(track.streamIndex)) continue;
-            try {
-              fallbackPath = await getOrCreateAudioVariant(filePath, id, track.streamIndex);
-              console.warn(`[Stream][AudioVariant] Last-resort fallback track selected: #${track.streamIndex} (${track.language})`);
-              break;
-            } catch {
-              // Try next fallback track.
-            }
-          }
-        }
-
-        if (!fallbackPath) {
-          console.error('[Stream][AudioVariant] No playable fallback audio track found.');
-          res.status(400).json({ error: 'Selected audio track is unavailable for this episode.' });
-          return;
-        }
-
-        filePath = fallbackPath;
+        console.error('[Stream][AudioVariant] Selected track failed:', variantError?.message || variantError);
+        res.status(400).json({ error: 'Selected audio track is unavailable for this episode.' });
+        return;
       }
     }
 
@@ -706,7 +778,7 @@ export async function streamEpisode(req: Request, res: Response) {
     }
 
     const rangeHeader = req.headers.range;
-    const mimeType = selectedAudioTrackIndex !== null ? 'video/mp4' : getMimeType(episode.file_path);
+    const mimeType = shouldBuildAudioVariant ? 'video/mp4' : getMimeType(episode.file_path);
 
     if (rangeHeader) {
       const [startStr, endStr] = rangeHeader.replace(/bytes=/, '').split('-');
@@ -772,16 +844,31 @@ export async function getEpisodeStreamTicket(req: Request, res: Response) {
     return;
   }
 
-  // When an audio track is explicitly selected, tell the frontend to use HLS
-  // segmented streaming instead of the legacy full-file remux approach.
-  const hlsRequired = typeof selectedAudioTrackIndex === 'number';
+  const userAgent = req.headers['user-agent'] || '';
+  const clientTypeParam = typeof req.query.clientType === 'string' ? req.query.clientType : undefined;
+  const isNativeApp =
+    userAgent.includes('Animind-Desktop') ||
+    userAgent.includes('Electron') ||
+    clientTypeParam === 'desktop' ||
+    clientTypeParam === 'native';
 
-  const ticket = createStreamTicket(id, selectedAudioTrackIndex);
-  const audioQuery = typeof selectedAudioTrackIndex === 'number' ? `&at=${selectedAudioTrackIndex}` : '';
+  const clientType: 'native' | 'browser' = isNativeApp ? 'native' : 'browser';
+  const ticketClientMode: 'n' | 'b' = isNativeApp ? 'n' : 'b';
+
+  // Native direct play should not request server-side audio variant build.
+  const ticketAudioTrackIndex = isNativeApp ? undefined : selectedAudioTrackIndex;
+  const hlsRequired = false;
+
+  const ticket = createStreamTicket(id, ticketAudioTrackIndex, ticketClientMode);
+  const audioQuery = typeof ticketAudioTrackIndex === 'number' ? `&at=${ticketAudioTrackIndex}` : '';
   res.json({
     url: `/api/episodes/${encodeURIComponent(id)}/stream?st=${encodeURIComponent(ticket)}${audioQuery}`,
     expiresIn: STREAM_TICKET_TTL_SECONDS,
     hlsRequired,
+    clientType,
+    message: isNativeApp
+      ? 'Native app detected - direct file stream (no server transcode).'
+      : 'Browser detected - standard stream behavior.',
   });
 }
 
@@ -843,7 +930,19 @@ export async function getEpisodeAudioTracks(req: Request, res: Response) {
   try {
     const fullVideoPath = path.resolve(env.LOCAL_STORAGE_PATH, episode.file_path);
     const tracks = await getEmbeddedAudioTracks(fullVideoPath);
-    res.json({ tracks });
+    const cacheMeta = await getAudioCacheMetadata(id);
+    const withCache = tracks.map(track => {
+      const cached = cacheMeta?.tracks.find(entry =>
+        entry.streamIndex === track.streamIndex
+        && entry.sourceSignature
+      );
+      return {
+        ...track,
+        cached: !!cached,
+        cacheMode: cached?.mode,
+      };
+    });
+    res.json({ tracks: withCache });
   } catch (err: any) {
     console.error('[AudioTracks] Error:', err.message);
     res.status(500).json({ error: 'Failed to load audio tracks.' });
