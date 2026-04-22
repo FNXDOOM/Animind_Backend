@@ -1,9 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
-import { createClerkClient } from '@clerk/backend';
+import { createClerkClient, verifyToken } from '@clerk/backend';
 import { env } from '../config/env.js';
 
-// Clerk backend client — verifies tokens using Clerk's own JWKS endpoint
-// No custom signing key needed. Clerk handles key rotation automatically.
+// Clerk client — used to fetch user metadata (isAdmin) after token verification
 const clerk = createClerkClient({
   secretKey: env.CLERK_SECRET_KEY,
 });
@@ -14,10 +13,8 @@ export interface AuthRequest extends Request {
 }
 
 /**
- * Verifies the Authorization: Bearer <token> header using Clerk's backend SDK.
- * Clerk automatically fetches and caches the JWKS from its own endpoint —
- * no manual key configuration required.
- *
+ * Verifies the Authorization: Bearer <token> header using Clerk.
+ * Uses standalone verifyToken() which is the correct API in @clerk/backend v3+.
  * Attaches req.userId (Clerk user ID) and req.isAdmin.
  */
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
@@ -30,8 +27,11 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   }
 
   try {
-    // verifyToken uses Clerk's JWKS endpoint automatically via the secret key
-    const payload = await clerk.verifyToken(token);
+    // verifyToken is a standalone function in @clerk/backend v3+
+    const payload = await verifyToken(token, {
+      secretKey: env.CLERK_SECRET_KEY,
+    });
+
     if (!payload?.sub) {
       res.status(401).json({ error: 'Invalid or expired token.' });
       return;
@@ -39,7 +39,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
     req.userId = payload.sub;
 
-    // Read isAdmin from Clerk publicMetadata
+    // Fetch user to check isAdmin from publicMetadata
     const user = await clerk.users.getUser(payload.sub);
     req.isAdmin = (user.publicMetadata as { isAdmin?: boolean })?.isAdmin === true;
 
