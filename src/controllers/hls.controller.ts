@@ -9,6 +9,7 @@
 import { Request, Response } from 'express';
 import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
+import { verifyToken } from '@clerk/backend';
 import { supabase } from '../config/db.js';
 import {
   createSession,
@@ -26,10 +27,12 @@ import { env } from '../config/env.js';
 async function verifyBearerAuth(authHeader?: string): Promise<string | null> {
   const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
   if (!token) return null;
-
-  const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data.user) return null;
-  return data.user.id;
+  try {
+    const payload = await verifyToken(token, { secretKey: env.CLERK_SECRET_KEY });
+    return payload?.sub ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ── Endpoints ────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
+import { verifyToken } from '@clerk/backend';
 import { supabase } from '../config/db.js';
 import { getStreamInfo } from '../services/stream.service.js';
 import { env } from '../config/env.js';
@@ -119,9 +120,12 @@ function verifyStreamTicket(ticket: string, episodeId: string): StreamTicketPayl
 async function verifyBearerAuth(authHeader?: string): Promise<boolean> {
   const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
   if (!token) return false;
-
-  const { data, error } = await supabase.auth.getUser(token);
-  return !error && !!data.user;
+  try {
+    const payload = await verifyToken(token, { secretKey: env.CLERK_SECRET_KEY });
+    return !!payload?.sub;
+  } catch {
+    return false;
+  }
 }
 
 function getS3Client(): S3Client {
