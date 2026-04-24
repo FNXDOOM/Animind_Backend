@@ -29,7 +29,8 @@ interface HlsSession {
   sourcePath: string;
   audioTrackIndex: number;
   browserSafeAudio: boolean;
-  videoPlan: VideoCompatibilityPlan;
+  /** Whether the source video is HEVC/H.265 — requires -tag:v hvc1 for Android ExoPlayer */
+  isHevc: boolean;
   ffmpegProcess: ChildProcess | null;
   dir: string;
   playlistPath: string;
@@ -59,25 +60,6 @@ const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 const sessions = new Map<string, HlsSession>();
 let cleanupTimer: ReturnType<typeof setInterval> | null = null;
-
-interface VideoStreamInfo {
-  codec?: string;
-  profile?: string;
-  pixelFormat?: string;
-  width?: number;
-  height?: number;
-  bitsPerRawSample?: number;
-}
-
-interface VideoCompatibilityPlan {
-  codec: string | null;
-  isHevc: boolean;
-  isTenBit: boolean;
-  width: number | null;
-  height: number | null;
-  requiresTranscode: boolean;
-  downscaleTo1080p: boolean;
-}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -134,7 +116,11 @@ async function getAudioStreamCodec(fullVideoPath: string, streamIndex: number): 
   }
 }
 
-async function getVideoStreamInfo(fullVideoPath: string): Promise<VideoStreamInfo> {
+/**
+ * Probe the first video stream codec of the source file.
+ * Used to detect HEVC/H.265 so we can add -tag:v hvc1 for Android ExoPlayer compatibility.
+ */
+async function getVideoStreamCodec(fullVideoPath: string): Promise<string | null> {
   const ffprobeBin = process.env.FFPROBE_PATH || 'ffprobe';
   const probeResult = await runProcess(ffprobeBin, [
     '-v', 'error',
@@ -145,130 +131,18 @@ async function getVideoStreamInfo(fullVideoPath: string): Promise<VideoStreamInf
   ]).catch(() => null);
 
   if (!probeResult || probeResult.code !== 0 || !probeResult.stdout.trim()) {
-    return {};
+    return null;
   }
 
   try {
     const parsed = JSON.parse(probeResult.stdout) as {
-      streams?: Array<{
-        codec_name?: string;
-        profile?: string;
-        pix_fmt?: string;
-        width?: number;
-        height?: number;
-        bits_per_raw_sample?: string | number;
-      }>;
+      streams?: Array<{ codec_name?: string }>;
     };
     const stream = (parsed.streams ?? [])[0];
-    return {
-      codec: stream?.codec_name ? String(stream.codec_name).toLowerCase() : undefined,
-      profile: stream?.profile ? String(stream.profile) : undefined,
-      pixelFormat: stream?.pix_fmt ? String(stream.pix_fmt).toLowerCase() : undefined,
-      width: typeof stream?.width === 'number' ? stream.width : undefined,
-      height: typeof stream?.height === 'number' ? stream.height : undefined,
-      bitsPerRawSample: Number.isFinite(Number(stream?.bits_per_raw_sample))
-        ? Number(stream?.bits_per_raw_sample)
-        : undefined,
-    };
+    return stream?.codec_name ? String(stream.codec_name).toLowerCase() : null;
   } catch {
-    return {};
+    return null;
   }
-}
-
-function buildVideoCompatibilityPlan(info: VideoStreamInfo): VideoCompatibilityPlan {
-  const codec = info.codec ?? null;
-  const isHevc = codec === 'hevc' || codec === 'h265';
-  const pixelFormat = String(info.pixelFormat ?? '').toLowerCase();
-  const profile = String(info.profile ?? '').toLowerCase();
-  const bitsPerRawSample = typeof info.bitsPerRawSample === 'number' ? info.bitsPerRawSample : 0;
-  const isTenBit =
-    bitsPerRawSample >= 10
-    || pixelFormat.includes('10')
-    || profile.includes('main 10')
-    || profile.includes('main10');
-  const width = typeof info.width === 'number' ? info.width : null;
-  const height = typeof info.height === 'number' ? info.height : null;
-  const downscaleTo1080p = (width ?? 0) > 1920 || (height ?? 0) > 1080;
-  const requiresTranscode = isHevc || isTenBit || downscaleTo1080p;
-
-  return {
-    codec,
-    isHevc,
-    isTenBit,
-    width,
-    height,
-    requiresTranscode,
-    downscaleTo1080p,
-  };
-}
-
-function buildVideoArgs(plan: VideoCompatibilityPlan): string[] {
-  if (!plan.requiresTranscode) {
-    return [
-      '-c:v', 'copy',
-      ...(plan.isHevc ? ['-tag:v', 'hvc1'] : []),
-    ];
-  }
-
-  const args = [
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-crf', '23',
-    '-pix_fmt', 'yuv420p',
-    '-profile:v', 'high',
-    '-level:v', '4.1',
-  ];
-
-  if (plan.downscaleTo1080p) {
-    args.push(
-      '-vf',
-      'scale=w=min(1920\\,iw):h=min(1080\\,ih):force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2'
-    );
-  }
-
-  return args;
-}
-
-function buildHlsFfmpegArgs(options: {
-  sourcePath: string;
-  audioTrackIndex: number;
-  audioCanCopy: boolean;
-  videoPlan: VideoCompatibilityPlan;
-  segmentPattern: string;
-  playlistPath: string;
-  segDuration: number;
-  startTime?: number;
-}): string[] {
-  const {
-    sourcePath,
-    audioTrackIndex,
-    audioCanCopy,
-    videoPlan,
-    segmentPattern,
-    playlistPath,
-    segDuration,
-    startTime = 0,
-  } = options;
-
-  return [
-    '-v', 'warning',
-    '-threads', '0',
-    ...(startTime > 0 ? ['-ss', String(startTime)] : []),
-    '-i', sourcePath,
-    '-map', '0:v:0',
-    '-map', `0:${audioTrackIndex}`,
-    ...buildVideoArgs(videoPlan),
-    ...(audioCanCopy ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
-    '-f', 'hls',
-    '-hls_time', String(segDuration),
-    '-hls_list_size', '0',
-    '-hls_playlist_type', 'event',
-    '-hls_segment_type', 'mpegts',
-    '-hls_flags', 'append_list+temp_file',
-    '-hls_segment_filename', segmentPattern,
-    '-start_number', '0',
-    playlistPath,
-  ];
 }
 
 /** Wait for playlist to contain at least one segment entry */
@@ -328,21 +202,37 @@ export async function createSession(
   const codec = await getAudioStreamCodec(sourcePath, audioTrackIndex).catch(() => null);
   const canCopyAudio = isMpegTsCopySafeCodec(codec ?? undefined);
 
-  const videoInfo = await getVideoStreamInfo(sourcePath).catch(() => ({}));
-  const videoPlan = buildVideoCompatibilityPlan(videoInfo);
+  // Detect HEVC/H.265 video — Android ExoPlayer requires -tag:v hvc1 for HEVC in MPEG-TS HLS.
+  // Without this tag ffmpeg defaults to hev1 which Media3 cannot decode.
+  const videoCodec = await getVideoStreamCodec(sourcePath).catch(() => null);
+  const isHevc = videoCodec === 'hevc' || videoCodec === 'h265';
 
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
   const segDuration = Math.max(2, Math.min(30, env.HLS_SEGMENT_DURATION));
-  const ffmpegArgs = buildHlsFfmpegArgs({
-    sourcePath,
-    audioTrackIndex,
-    audioCanCopy: canCopyAudio,
-    videoPlan,
-    segmentPattern,
+
+  const ffmpegArgs: string[] = [
+    '-v', 'warning',
+    '-threads', '0',
+    // Seek to start position if specified
+    ...(startTime > 0 ? ['-ss', String(startTime)] : []),
+    '-i', sourcePath,
+    '-map', '0:v:0',
+    '-map', `0:${audioTrackIndex}`,
+    '-c:v', 'copy',
+    // HEVC in MPEG-TS must be tagged hvc1 for Android Media3/ExoPlayer to decode it.
+    // Without this flag ffmpeg emits a warning and uses hev1, which Android rejects.
+    ...(isHevc ? ['-tag:v', 'hvc1'] : []),
+    ...(canCopyAudio ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
+    '-f', 'hls',
+    '-hls_time', String(segDuration),
+    '-hls_list_size', '0',
+    '-hls_playlist_type', 'event',
+    '-hls_segment_type', 'mpegts',
+    '-hls_flags', 'append_list+temp_file',
+    '-hls_segment_filename', segmentPattern,
+    '-start_number', '0',
     playlistPath,
-    segDuration,
-    startTime,
-  });
+  ];
 
   const ffmpegProcess = spawn(ffmpegBin, ffmpegArgs, {
     windowsHide: true,
@@ -376,7 +266,7 @@ export async function createSession(
     sourcePath,
     audioTrackIndex,
     browserSafeAudio: canCopyAudio,
-    videoPlan,
+    isHevc,
     ffmpegProcess,
     dir: sessionDir,
     playlistPath,
@@ -394,14 +284,7 @@ export async function createSession(
   // when hls.js first loads it (important for frontends without retry logic).
   await readyPromise;
 
-  const videoMode = videoPlan.requiresTranscode
-    ? `[transcode→h264${videoPlan.downscaleTo1080p ? ' 1080p' : ''}${videoPlan.isTenBit ? ' 8-bit' : ''}]`
-    : `[copy${videoPlan.isHevc ? ' hvc1' : ''}]`;
-  console.log(
-    `[HLS] Session ${sessionId.slice(0, 8)} created for episode ${episodeId} `
-    + `(video: ${videoPlan.codec ?? 'unknown'} ${videoMode}, audio: track ${audioTrackIndex} `
-    + `codec=${codec ?? 'unknown'} ${canCopyAudio ? '[copy]' : '[→aac transcode]'})`
-  );
+  console.log(`[HLS] Session ${sessionId.slice(0, 8)} created for episode ${episodeId} (video: ${videoCodec ?? 'unknown'}${isHevc ? ' [hvc1 tag]' : ''}, audio: track ${audioTrackIndex} codec=${codec ?? 'unknown'} ${canCopyAudio ? '[copy]' : '[→aac transcode]'})`);
 
   return {
     sessionId,
@@ -503,16 +386,28 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
   const segDuration = Math.max(2, Math.min(30, env.HLS_SEGMENT_DURATION));
   const segmentPattern = path.join(session.dir, 'seg%05d.ts');
-  const ffmpegArgs = buildHlsFfmpegArgs({
-    sourcePath: session.sourcePath,
-    audioTrackIndex: session.audioTrackIndex,
-    audioCanCopy: session.browserSafeAudio,
-    videoPlan: session.videoPlan,
-    segmentPattern,
-    playlistPath: session.playlistPath,
-    segDuration,
-    startTime: Math.max(0, timeSeconds),
-  });
+
+  const ffmpegArgs: string[] = [
+    '-v', 'warning',
+    '-threads', '0',
+    '-ss', String(Math.max(0, timeSeconds)),
+    '-i', session.sourcePath,
+    '-map', '0:v:0',
+    '-map', `0:${session.audioTrackIndex}`,
+    '-c:v', 'copy',
+    // Preserve hvc1 tag on seek restart — same requirement as createSession.
+    ...(session.isHevc ? ['-tag:v', 'hvc1'] : []),
+    ...(session.browserSafeAudio ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
+    '-f', 'hls',
+    '-hls_time', String(segDuration),
+    '-hls_list_size', '0',
+    '-hls_playlist_type', 'event',
+    '-hls_segment_type', 'mpegts',
+    '-hls_flags', 'append_list+temp_file',
+    '-hls_segment_filename', segmentPattern,
+    '-start_number', '0',
+    session.playlistPath,
+  ];
 
   const ffmpegProcess = spawn(ffmpegBin, ffmpegArgs, {
     windowsHide: true,
