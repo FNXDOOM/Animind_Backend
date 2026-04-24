@@ -1,6 +1,13 @@
 import { Router } from 'express';
 import { getShows, getShowById } from '../controllers/show.controller.js';
 import { streamEpisode, getEpisodeSubtitles, getEpisodeStreamTicket, getEpisodeAudioTracks } from '../controllers/episode.controller.js';
+import {
+  createHlsSessionHandler,
+  serveHlsPlaylist,
+  serveHlsSegment,
+  seekHlsSessionHandler,
+  destroyHlsSessionHandler,
+} from '../controllers/hls.controller.js';
 import { rescanLibrary, storageWebhook } from '../controllers/scanner.controller.js';
 import { listUsers, setAdminStatus, deleteShow, triggerAdminScan } from '../controllers/admin.controller.js';
 import { deleteMyAccount } from '../controllers/account.controller.js';
@@ -32,6 +39,11 @@ router.post('/webhooks/storage', webhookRateLimit as any, storageWebhook);
 // Stream endpoint — frontend VideoModal fetches this for the actual video URL
 router.get('/episodes/:id/stream-ticket', requireAuth as any, getEpisodeStreamTicket);
 router.get('/episodes/:id/stream', streamEpisode);
+router.post('/episodes/:id/hls-session', createHlsSessionHandler);
+router.get('/hls/:sessionId/playlist.m3u8', serveHlsPlaylist);
+router.get('/hls/:sessionId/:segment', serveHlsSegment);
+router.post('/hls/:sessionId/seek', seekHlsSessionHandler);
+router.delete('/hls/:sessionId', destroyHlsSessionHandler);
 router.get('/episodes/:id/subtitles', requireAuth as any, getEpisodeSubtitles);
 router.get('/episodes/:id/audio-tracks', requireAuth as any, getEpisodeAudioTracks);
 router.delete('/account', requireAuth as any, deleteMyAccount as any);
