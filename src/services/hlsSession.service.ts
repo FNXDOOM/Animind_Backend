@@ -44,7 +44,15 @@ interface HlsSession {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const BROWSER_SAFE_AUDIO_CODECS = new Set(['aac', 'mp3', 'opus', 'vorbis']);
+/**
+ * Audio codecs that can be stream-copied directly into MPEG-TS (HLS).
+ *
+ * IMPORTANT: Opus and Vorbis are NOT valid in MPEG-TS — the TS specification
+ * has no registered PID for them. Attempting -c:a copy with Opus/Vorbis causes
+ * ffmpeg to emit "Error parsing Opus/Vorbis packet header" and write broken
+ * segments that ExoPlayer cannot decode. Always transcode those to AAC.
+ */
+const HLS_MPEGTS_COPY_SAFE_CODECS = new Set(['aac', 'mp3']);
 const HLS_ROOT_DIR = path.join(os.tmpdir(), 'animind-hls');
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -55,10 +63,16 @@ let cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function isBrowserSafeAudioCodec(codec?: string): boolean {
+/**
+ * Returns true only for codecs that are valid in MPEG-TS and safe to copy.
+ * Opus and Vorbis are excluded even though they play fine in MP4/WebM,
+ * because MPEG-TS does not support them.
+ */
+function isMpegTsCopySafeCodec(codec?: string): boolean {
   const normalized = String(codec ?? '').toLowerCase().trim();
   if (!normalized) return false;
-  return normalized === 'mp4a' || normalized.startsWith('aac') || BROWSER_SAFE_AUDIO_CODECS.has(normalized);
+  // aac covers both 'aac' and 'aac_latm'; mp4a is the MPEG-4 Audio Object type alias
+  return normalized === 'mp4a' || normalized.startsWith('aac') || HLS_MPEGTS_COPY_SAFE_CODECS.has(normalized);
 }
 
 function generateSessionId(): string {
@@ -183,9 +197,10 @@ export async function createSession(
   const playlistPath = path.join(sessionDir, 'playlist.m3u8');
   const segmentPattern = path.join(sessionDir, 'seg%05d.ts');
 
-  // Determine audio encoding strategy
+  // Determine audio encoding strategy.
+  // Only AAC and MP3 can be stream-copied into MPEG-TS; Opus/Vorbis must be transcoded.
   const codec = await getAudioStreamCodec(sourcePath, audioTrackIndex).catch(() => null);
-  const browserSafe = isBrowserSafeAudioCodec(codec ?? undefined);
+  const canCopyAudio = isMpegTsCopySafeCodec(codec ?? undefined);
 
   // Detect HEVC/H.265 video — Android ExoPlayer requires -tag:v hvc1 for HEVC in MPEG-TS HLS.
   // Without this tag ffmpeg defaults to hev1 which Media3 cannot decode.
@@ -207,7 +222,7 @@ export async function createSession(
     // HEVC in MPEG-TS must be tagged hvc1 for Android Media3/ExoPlayer to decode it.
     // Without this flag ffmpeg emits a warning and uses hev1, which Android rejects.
     ...(isHevc ? ['-tag:v', 'hvc1'] : []),
-    ...(browserSafe ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
+    ...(canCopyAudio ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
     '-f', 'hls',
     '-hls_time', String(segDuration),
     '-hls_list_size', '0',
@@ -250,7 +265,7 @@ export async function createSession(
     episodeId,
     sourcePath,
     audioTrackIndex,
-    browserSafeAudio: browserSafe,
+    browserSafeAudio: canCopyAudio,
     isHevc,
     ffmpegProcess,
     dir: sessionDir,
@@ -269,7 +284,7 @@ export async function createSession(
   // when hls.js first loads it (important for frontends without retry logic).
   await readyPromise;
 
-  console.log(`[HLS] Session ${sessionId.slice(0, 8)} created for episode ${episodeId} (video: ${videoCodec ?? 'unknown'}${isHevc ? ' [hvc1 tag]' : ''}, audio track ${audioTrackIndex}, codec: ${codec ?? 'unknown'}, ${browserSafe ? 'copy' : 'transcode'})`);
+  console.log(`[HLS] Session ${sessionId.slice(0, 8)} created for episode ${episodeId} (video: ${videoCodec ?? 'unknown'}${isHevc ? ' [hvc1 tag]' : ''}, audio: track ${audioTrackIndex} codec=${codec ?? 'unknown'} ${canCopyAudio ? '[copy]' : '[→aac transcode]'})`);
 
   return {
     sessionId,
