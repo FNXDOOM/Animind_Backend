@@ -128,6 +128,10 @@ export async function serveHlsPlaylist(req: Request, res: Response) {
       return;
     }
 
+    // Diagnostic: log first 5 lines so we can confirm segment paths are relative (not absolute OS paths)
+    const preview = content.split('\n').filter(l => l.trim()).slice(0, 6).join(' | ');
+    console.log(`[HLS][${sessionId.slice(0, 8)}] playlist preview: ${preview}`);
+
     res.send(content);
   } catch (err: any) {
     console.error('[HLS] Playlist serve error:', err.message);
