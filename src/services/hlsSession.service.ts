@@ -29,6 +29,8 @@ interface HlsSession {
   sourcePath: string;
   audioTrackIndex: number;
   browserSafeAudio: boolean;
+  /** Whether the source video is HEVC/H.265 — requires -tag:v hvc1 for Android ExoPlayer */
+  isHevc: boolean;
   ffmpegProcess: ChildProcess | null;
   dir: string;
   playlistPath: string;
@@ -100,6 +102,35 @@ async function getAudioStreamCodec(fullVideoPath: string, streamIndex: number): 
   }
 }
 
+/**
+ * Probe the first video stream codec of the source file.
+ * Used to detect HEVC/H.265 so we can add -tag:v hvc1 for Android ExoPlayer compatibility.
+ */
+async function getVideoStreamCodec(fullVideoPath: string): Promise<string | null> {
+  const ffprobeBin = process.env.FFPROBE_PATH || 'ffprobe';
+  const probeResult = await runProcess(ffprobeBin, [
+    '-v', 'error',
+    '-print_format', 'json',
+    '-show_streams',
+    '-select_streams', 'v:0',
+    fullVideoPath,
+  ]).catch(() => null);
+
+  if (!probeResult || probeResult.code !== 0 || !probeResult.stdout.trim()) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(probeResult.stdout) as {
+      streams?: Array<{ codec_name?: string }>;
+    };
+    const stream = (parsed.streams ?? [])[0];
+    return stream?.codec_name ? String(stream.codec_name).toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Wait for playlist to contain at least one segment entry */
 async function waitForFirstSegment(playlistPath: string, timeoutMs = 15000): Promise<void> {
   const start = Date.now();
@@ -156,6 +187,11 @@ export async function createSession(
   const codec = await getAudioStreamCodec(sourcePath, audioTrackIndex).catch(() => null);
   const browserSafe = isBrowserSafeAudioCodec(codec ?? undefined);
 
+  // Detect HEVC/H.265 video — Android ExoPlayer requires -tag:v hvc1 for HEVC in MPEG-TS HLS.
+  // Without this tag ffmpeg defaults to hev1 which Media3 cannot decode.
+  const videoCodec = await getVideoStreamCodec(sourcePath).catch(() => null);
+  const isHevc = videoCodec === 'hevc' || videoCodec === 'h265';
+
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
   const segDuration = Math.max(2, Math.min(30, env.HLS_SEGMENT_DURATION));
 
@@ -168,6 +204,9 @@ export async function createSession(
     '-map', '0:v:0',
     '-map', `0:${audioTrackIndex}`,
     '-c:v', 'copy',
+    // HEVC in MPEG-TS must be tagged hvc1 for Android Media3/ExoPlayer to decode it.
+    // Without this flag ffmpeg emits a warning and uses hev1, which Android rejects.
+    ...(isHevc ? ['-tag:v', 'hvc1'] : []),
     ...(browserSafe ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
     '-f', 'hls',
     '-hls_time', String(segDuration),
@@ -212,6 +251,7 @@ export async function createSession(
     sourcePath,
     audioTrackIndex,
     browserSafeAudio: browserSafe,
+    isHevc,
     ffmpegProcess,
     dir: sessionDir,
     playlistPath,
@@ -229,7 +269,7 @@ export async function createSession(
   // when hls.js first loads it (important for frontends without retry logic).
   await readyPromise;
 
-  console.log(`[HLS] Session ${sessionId.slice(0, 8)} created for episode ${episodeId} (audio track ${audioTrackIndex}, codec: ${codec ?? 'unknown'}, ${browserSafe ? 'copy' : 'transcode'})`);
+  console.log(`[HLS] Session ${sessionId.slice(0, 8)} created for episode ${episodeId} (video: ${videoCodec ?? 'unknown'}${isHevc ? ' [hvc1 tag]' : ''}, audio track ${audioTrackIndex}, codec: ${codec ?? 'unknown'}, ${browserSafe ? 'copy' : 'transcode'})`);
 
   return {
     sessionId,
@@ -316,6 +356,8 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
     '-map', '0:v:0',
     '-map', `0:${session.audioTrackIndex}`,
     '-c:v', 'copy',
+    // Preserve hvc1 tag on seek restart — same requirement as createSession.
+    ...(session.isHevc ? ['-tag:v', 'hvc1'] : []),
     ...(session.browserSafeAudio ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
     '-f', 'hls',
     '-hls_time', String(segDuration),
