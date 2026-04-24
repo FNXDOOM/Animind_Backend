@@ -212,8 +212,7 @@ function buildVideoArgs(plan: VideoCompatibilityPlan): string[] {
 
   const args = [
     '-c:v', 'libx264',
-    '-preset', env.HLS_TRANSCODE_PRESET,
-    '-tune', 'zerolatency',
+    '-preset', 'veryfast',
     '-crf', '23',
     '-pix_fmt', 'yuv420p',
     '-profile:v', 'high',
@@ -253,7 +252,7 @@ function buildHlsFfmpegArgs(options: {
 
   return [
     '-v', 'warning',
-    '-threads', String(Math.max(1, env.HLS_FFMPEG_THREADS)),
+    '-threads', '0',
     ...(startTime > 0 ? ['-ss', String(startTime)] : []),
     '-i', sourcePath,
     '-map', '0:v:0',
@@ -273,7 +272,7 @@ function buildHlsFfmpegArgs(options: {
 }
 
 /** Wait for playlist to contain at least one segment entry */
-async function waitForFirstSegment(playlistPath: string, timeoutMs = env.HLS_FIRST_SEGMENT_TIMEOUT_MS): Promise<void> {
+async function waitForFirstSegment(playlistPath: string, timeoutMs = 15000): Promise<void> {
   const start = Date.now();
   const checkInterval = 250;
 
@@ -290,7 +289,7 @@ async function waitForFirstSegment(playlistPath: string, timeoutMs = env.HLS_FIR
     await new Promise(resolve => setTimeout(resolve, checkInterval));
   }
 
-  throw new Error(`HLS session timed out waiting for first segment after ${timeoutMs}ms`);
+  throw new Error('HLS session timed out waiting for first segment');
 }
 
 // ── Core API ─────────────────────────────────────────────────────────────────
@@ -349,13 +348,11 @@ export async function createSession(
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  let lastFfmpegMessage = '';
 
   // Log ffmpeg errors but don't crash
   ffmpegProcess.stderr?.on('data', (chunk: Buffer) => {
     const msg = chunk.toString().trim();
     if (msg && !msg.startsWith('frame=')) {
-      lastFfmpegMessage = msg.split('\n').map(line => line.trim()).filter(Boolean).slice(-1)[0] ?? msg;
       console.warn(`[HLS][${sessionId.slice(0, 8)}] ffmpeg: ${msg.slice(0, 200)}`);
     }
   });
@@ -364,11 +361,10 @@ export async function createSession(
     console.error(`[HLS][${sessionId.slice(0, 8)}] ffmpeg process error:`, err.message);
   });
 
-  ffmpegProcess.on('close', (code, signal) => {
+  ffmpegProcess.on('close', (code) => {
     const session = sessions.get(sessionId);
     if (session && !session.destroying) {
-      const suffix = lastFfmpegMessage ? ` | last stderr: ${lastFfmpegMessage.slice(0, 200)}` : '';
-      console.log(`[HLS][${sessionId.slice(0, 8)}] ffmpeg exited with code ${code} signal ${signal ?? 'none'}${suffix}`);
+      console.log(`[HLS][${sessionId.slice(0, 8)}] ffmpeg exited with code ${code}`);
     }
   });
 
@@ -396,12 +392,7 @@ export async function createSession(
   // Wait for the first segment before returning — with 2s segments this
   // blocks for only ~1-2 seconds, and guarantees the playlist is playable
   // when hls.js first loads it (important for frontends without retry logic).
-  try {
-    await readyPromise;
-  } catch (error) {
-    await destroySession(sessionId);
-    throw error;
-  }
+  await readyPromise;
 
   const videoMode = videoPlan.requiresTranscode
     ? `[transcode→h264${videoPlan.downscaleTo1080p ? ' 1080p' : ''}${videoPlan.isTenBit ? ' 8-bit' : ''}]`
@@ -527,12 +518,10 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  let lastFfmpegMessage = '';
 
   ffmpegProcess.stderr?.on('data', (chunk: Buffer) => {
     const msg = chunk.toString().trim();
     if (msg && !msg.startsWith('frame=')) {
-      lastFfmpegMessage = msg.split('\n').map(line => line.trim()).filter(Boolean).slice(-1)[0] ?? msg;
       console.warn(`[HLS][${sessionId.slice(0, 8)}] ffmpeg: ${msg.slice(0, 200)}`);
     }
   });
@@ -541,11 +530,10 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
     console.error(`[HLS][${sessionId.slice(0, 8)}] ffmpeg process error:`, err.message);
   });
 
-  ffmpegProcess.on('close', (code, signal) => {
+  ffmpegProcess.on('close', (code) => {
     const s = sessions.get(sessionId);
     if (s && !s.destroying) {
-      const suffix = lastFfmpegMessage ? ` | last stderr: ${lastFfmpegMessage.slice(0, 200)}` : '';
-      console.log(`[HLS][${sessionId.slice(0, 8)}] ffmpeg (seek) exited with code ${code} signal ${signal ?? 'none'}${suffix}`);
+      console.log(`[HLS][${sessionId.slice(0, 8)}] ffmpeg (seek) exited with code ${code}`);
     }
   });
 

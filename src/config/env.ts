@@ -68,7 +68,4 @@ export const env = {
   HLS_SEGMENT_DURATION: parseInt(process.env.HLS_SEGMENT_DURATION ?? '10', 10),
   HLS_MAX_CONCURRENT_SESSIONS: parseInt(process.env.HLS_MAX_CONCURRENT_SESSIONS ?? '2', 10),
   HLS_SESSION_TIMEOUT_MINUTES: parseInt(process.env.HLS_SESSION_TIMEOUT_MINUTES ?? '120', 10),
-  HLS_FIRST_SEGMENT_TIMEOUT_MS: parseInt(process.env.HLS_FIRST_SEGMENT_TIMEOUT_MS ?? '45000', 10),
-  HLS_FFMPEG_THREADS: parseInt(process.env.HLS_FFMPEG_THREADS ?? '1', 10),
-  HLS_TRANSCODE_PRESET: process.env.HLS_TRANSCODE_PRESET ?? 'ultrafast',
 };
