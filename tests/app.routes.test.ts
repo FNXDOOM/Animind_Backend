@@ -26,6 +26,21 @@ const controllerMocks = vi.hoisted(() => ({
   getEpisodeAudioTracks: vi.fn((_req, res) => {
     res.status(200).json({ tracks: [] });
   }),
+  createHlsSessionHandler: vi.fn((_req, res) => {
+    res.status(200).json({ sessionId: 'hls-1', playlistUrl: '/api/hls/hls-1/playlist.m3u8' });
+  }),
+  serveHlsPlaylist: vi.fn((_req, res) => {
+    res.type('application/vnd.apple.mpegurl').send('#EXTM3U');
+  }),
+  serveHlsSegment: vi.fn((_req, res) => {
+    res.status(200).send('segment-bytes');
+  }),
+  seekHlsSessionHandler: vi.fn((_req, res) => {
+    res.status(200).json({ success: true, seekedTo: 42 });
+  }),
+  destroyHlsSessionHandler: vi.fn((_req, res) => {
+    res.status(200).json({ success: true });
+  }),
   deleteMyAccount: vi.fn((_req, res) => {
     res.status(204).send();
   }),
@@ -58,6 +73,14 @@ vi.mock('../src/controllers/episode.controller.js', () => ({
   getEpisodeStreamTicket: controllerMocks.getEpisodeStreamTicket,
   getEpisodeSubtitles: controllerMocks.getEpisodeSubtitles,
   getEpisodeAudioTracks: controllerMocks.getEpisodeAudioTracks,
+}));
+
+vi.mock('../src/controllers/hls.controller.js', () => ({
+  createHlsSessionHandler: controllerMocks.createHlsSessionHandler,
+  serveHlsPlaylist: controllerMocks.serveHlsPlaylist,
+  serveHlsSegment: controllerMocks.serveHlsSegment,
+  seekHlsSessionHandler: controllerMocks.seekHlsSessionHandler,
+  destroyHlsSessionHandler: controllerMocks.destroyHlsSessionHandler,
 }));
 
 vi.mock('../src/controllers/account.controller.js', () => ({
@@ -166,6 +189,32 @@ describe('app + api routes', () => {
     expect(response.status).toBe(200);
     expect(controllerMocks.streamEpisode).toHaveBeenCalledTimes(1);
     expect(response.body.url).toBe('https://stream.local/ep-1');
+  });
+
+  it('POST /api/episodes/:id/hls-session reaches the HLS session handler', async () => {
+    const response = await request(app)
+      .post('/api/episodes/ep-1/hls-session')
+      .send({ audioTrackIndex: 1 });
+
+    expect(response.status).toBe(200);
+    expect(controllerMocks.createHlsSessionHandler).toHaveBeenCalledTimes(1);
+    expect(response.body.playlistUrl).toBe('/api/hls/hls-1/playlist.m3u8');
+  });
+
+  it('GET /api/hls/:sessionId/playlist.m3u8 reaches the playlist handler', async () => {
+    const response = await request(app).get('/api/hls/hls-1/playlist.m3u8');
+
+    expect(response.status).toBe(200);
+    expect(controllerMocks.serveHlsPlaylist).toHaveBeenCalledTimes(1);
+    expect(response.text).toContain('#EXTM3U');
+  });
+
+  it('GET /api/hls/:sessionId/:segment reaches the segment handler', async () => {
+    const response = await request(app).get('/api/hls/hls-1/segment-001.ts');
+
+    expect(response.status).toBe(200);
+    expect(controllerMocks.serveHlsSegment).toHaveBeenCalledTimes(1);
+    expect(response.text).toBe('segment-bytes');
   });
 
   it('GET /api/admin/users denies non-admin token', async () => {
