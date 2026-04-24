@@ -302,7 +302,31 @@ export async function getPlaylist(sessionId: string): Promise<string | null> {
   session.lastAccess = Date.now();
 
   try {
-    return await readFile(session.playlistPath, 'utf-8');
+    const raw = await readFile(session.playlistPath, 'utf-8');
+
+    // ffmpeg writes absolute OS filesystem paths into the playlist, e.g.:
+    //   /tmp/animind-hls/<sessionId>/seg00000.ts   (Linux/macOS)
+    //   C:\Users\...\seg00000.ts                   (Windows)
+    //
+    // ExoPlayer interprets every non-comment, non-empty line as a URL.
+    // It would try to fetch "/tmp/animind-hls/.../seg00000.ts" literally,
+    // which returns 404 — the real reason HLS playback was silently failing.
+    //
+    // Fix: strip each segment line to its basename. ExoPlayer then resolves
+    // it relative to the playlist URL, hitting GET /api/hls/:sessionId/:segment.
+    const rewritten = raw
+      .split('\n')
+      .map(line => {
+        const trimmed = line.trim();
+        // Only touch non-empty, non-directive lines that look like .ts paths
+        if (trimmed.length > 0 && !trimmed.startsWith('#') && trimmed.endsWith('.ts')) {
+          return path.basename(trimmed);
+        }
+        return line;
+      })
+      .join('\n');
+
+    return rewritten;
   } catch {
     return null;
   }
