@@ -6,8 +6,7 @@
  */
 
 import { S3Client, ListObjectsV2Command, ListObjectsV2CommandOutput } from '@aws-sdk/client-s3';
-import { readdir, stat, mkdir, access } from 'fs/promises';
-import { constants as fsConstants } from 'fs';
+import { readdir, mkdir } from 'fs/promises';
 import { spawn } from 'child_process';
 import path from 'path';
 import { env } from '../config/env.js';
@@ -397,6 +396,7 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, s
 
   // If subtitle files already exist for this episode, don't try to regenerate.
   // This prevents repeated ffmpeg writes on read-only subtitle directories.
+  // IMPORTANT: only skip if there are actual .vtt/.srt files — empty dirs are NOT skipped.
   try {
     const existingSubtitleEntries = await readdir(subtitlesDir);
     const hasExistingSubtitles = existingSubtitleEntries.some(entry =>
@@ -405,14 +405,22 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, s
     if (hasExistingSubtitles) {
       return;
     }
+    // Directory exists but is empty — fall through to extract subtitles.
+    // This handles the case where a previous scan created the folder but
+    // failed to populate it (e.g. due to a metadata/AniList error).
+    console.log(`[Scanner] Empty subtitle dir found for ${path.basename(filePath)}, will re-attempt extraction.`);
   } catch {
-    // Continue; ffmpeg path below will still attempt extraction.
+    // Dir doesn't exist yet — mkdir above created it, continue normally.
   }
 
   // Skip extraction when directory isn't writable (common with bind mounts).
+  // We attempt a probe write rather than relying solely on fs.access(), because
+  // access() can return false negatives on some Linux mount configurations.
   try {
-    await stat(subtitlesDir);
-    await access(subtitlesDir, fsConstants.W_OK);
+    const probeFile = path.join(subtitlesDir, '.write-probe');
+    const { writeFile, unlink } = await import('fs/promises');
+    await writeFile(probeFile, '');
+    await unlink(probeFile);
   } catch {
     console.warn(
       `[Scanner] Subtitle directory not writable for ${path.basename(filePath)} (${subtitleRelativePath}). Skipping extraction.`
