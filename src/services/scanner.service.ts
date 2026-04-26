@@ -478,6 +478,7 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, s
     const vttFilePath = path.join(subtitlesDir, vttFileName);
 
     try {
+      const { stat } = await import('fs/promises');
       await stat(vttFilePath);
       console.log(`[Scanner] Subtitle already exists: ${path.join('Subtitles', formatEpisodeFolder(episodeNumber), vttFileName)}`);
       continue;
