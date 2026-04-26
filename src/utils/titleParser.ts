@@ -38,6 +38,28 @@ function stripTrailingNoise(name: string): string {
     .trim();
 }
 
+/**
+ * Clean a folder name that may contain release-group noise.
+ * e.g. "Re.ZERO.Starting.Life.in.Another.World.S03.1080p.BluRay.Opus.2.0.x265-Headpatter"
+ *   → "Re ZERO Starting Life in Another World"
+ * Strips everything from the first quality/codec/season marker onward.
+ */
+function cleanFolderTitle(folderName: string): string {
+  // Replace dots/underscores with spaces first
+  let name = folderName.replace(/[._]+/g, ' ');
+
+  // Strip everything from a season marker (S01, S03 …) onward
+  name = name.replace(/\s+[Ss]\d{1,2}\b.*$/i, '');
+
+  // Strip everything from a quality tag onward (480p, 720p, 1080p, 2160p, BluRay, WEB-DL …)
+  name = name.replace(/\s+(\d{3,4}p|BluRay|WEBRip|WEB-DL|HDTV|BDRip|DVDRip|x264|x265|HEVC|AVC|AAC|Opus|FLAC|H\.?264|H\.?265)\b.*/i, '');
+
+  // Strip trailing release-group suffix after a hyphen (e.g. "-Headpatter")
+  name = name.replace(/\s+-\s*\S+\s*$/, '');
+
+  return name.trim();
+}
+
 // Try to extract episode number in patterns like: "- 01", "E01", "Episode 01", " 01 "
 function extractEpisode(name: string): { title: string; episode: number; season?: number } | null {
   // Pattern: "Title - 01" or "Title – 01"
@@ -135,7 +157,8 @@ export function parseFolderPath(relativePath: string): ParsedAnime | null {
 
   // Prefer folder name as title if it looks meaningful
   if (folderTitle && folderTitle.length > 1 && !/^season/i.test(folderTitle)) {
-    parsed.title = stripSeasonSuffix(folderTitle.trim()) || folderTitle.trim();
+    const cleanedFolder = cleanFolderTitle(folderTitle.trim());
+    parsed.title = stripSeasonSuffix(cleanedFolder) || cleanedFolder || folderTitle.trim();
   } else if (!parsed.title) {
     return null;
   }
