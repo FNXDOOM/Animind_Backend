@@ -343,6 +343,148 @@ function runProcess(command: string, args: string[]): Promise<{ code: number; st
   });
 }
 
+/**
+ * Convert a raw ASS/SSA string to a clean WebVTT string.
+ *
+ * Problems with ffmpeg's built-in ASS→VTT:
+ *  - Karaoke vector drawing commands ("m 17.48 19.22 l ...") leak as visible text
+ *  - Typeset signs, OP/ED romaji tracks, and \k karaoke syllables all render as junk
+ *
+ * This function:
+ *  1. Parses only [Events] Dialogue lines (ignores Comments)
+ *  2. Drops lines where the Style name signals non-dialogue (Signs, Karaoke, OP, ED, Title …)
+ *  3. Drops lines that are pure drawing commands (\p1 … \p0 or \p1 in override tags)
+ *  4. Strips ALL ASS override tags ({\…}) from the remaining text
+ *  5. Drops lines whose cleaned text is empty or looks like raw coords / numbers only
+ *  6. Deduplicates consecutive identical cues (common with multi-track karaoke)
+ *  7. Emits a valid WEBVTT file
+ */
+function convertAssToVtt(assContent: string): string {
+  const lines = assContent.split(/\r?\n/);
+
+  // ── 1. Parse Format line to get column indices ───────────────────────────
+  let formatCols: string[] = [];
+  let inEvents = false;
+  const dialogueLines: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === '[Events]') { inEvents = true; continue; }
+    if (trimmed.startsWith('[') && trimmed !== '[Events]') { inEvents = false; continue; }
+    if (!inEvents) continue;
+
+    if (trimmed.startsWith('Format:')) {
+      formatCols = trimmed.slice(7).split(',').map(c => c.trim().toLowerCase());
+      continue;
+    }
+    if (trimmed.startsWith('Dialogue:')) {
+      dialogueLines.push(trimmed);
+    }
+    // Skip Comment: lines entirely
+  }
+
+  if (!formatCols.length || !dialogueLines.length) return '';
+
+  const iCol = (name: string) => formatCols.indexOf(name);
+  const startIdx  = iCol('start');
+  const endIdx    = iCol('end');
+  const styleIdx  = iCol('style');
+  const textIdx   = iCol('text');
+
+  if (startIdx < 0 || endIdx < 0 || textIdx < 0) return '';
+
+  // ── 2. Style name blocklist — these are never real dialogue ─────────────
+  const nonDialogueStylePattern = /sign|caption|title|song|op|ed|opening|ending|karaoke|kara|romaji|credit|note|info|typeset|on\s?screen|screen/i;
+
+  // ── 3. Helpers ────────────────────────────────────────────────────────────
+  function assTimeToVtt(t: string): string {
+    // ASS: H:MM:SS.cc  →  VTT: HH:MM:SS.mmm
+    const m = t.match(/(\d+):(\d{2}):(\d{2})\.(\d{2})/);
+    if (!m) return '00:00:00.000';
+    const [, h, min, sec, cs] = m;
+    return `${h.padStart(2,'0')}:${min}:${sec}.${cs}0`;
+  }
+
+  function stripTags(text: string): string {
+    return text
+      .replace(/\{[^}]*\}/g, '')   // remove all {\tag} override blocks
+      .replace(/\\N/g, '\n')       // \N = hard line break
+      .replace(/\\n/g, '\n')       // \n = soft line break
+      .replace(/\\h/g, '\u00A0')  // \h = hard space
+      .trim();
+  }
+
+  function hasDrawingCommand(rawText: string): boolean {
+    // \p1 (or \p2, \p3…) inside override tags = vector drawing mode
+    return /\{[^}]*\\p[1-9][^}]*\}/.test(rawText);
+  }
+
+  function looksLikeJunk(text: string): boolean {
+    if (!text) return true;
+    // Pure numbers / coordinate strings leftover from drawing commands
+    if (/^[\d\s.\-mlbsqnp]+$/i.test(text)) return true;
+    // Only whitespace / punctuation
+    if (/^[\s\W]+$/.test(text)) return true;
+    return false;
+  }
+
+  // ── 4. Parse each Dialogue line ───────────────────────────────────────────
+  interface Cue { start: string; end: string; text: string; }
+  const cues: Cue[] = [];
+
+  for (const dl of dialogueLines) {
+    // Dialogue: <value>,<value>,…,<text with possible commas>
+    const raw = dl.slice('Dialogue:'.length).trim();
+    // Split only up to (textIdx) commas so the text field is kept whole
+    const parts = raw.split(',');
+    if (parts.length <= textIdx) continue;
+
+    const start = parts[startIdx]?.trim();
+    const end   = parts[endIdx]?.trim();
+    const style = styleIdx >= 0 ? (parts[styleIdx]?.trim() ?? '') : '';
+    // Text is everything from textIdx onward (may contain commas)
+    const rawText = parts.slice(textIdx).join(',');
+
+    if (!start || !end) continue;
+
+    // Drop non-dialogue styles
+    if (style && nonDialogueStylePattern.test(style)) continue;
+
+    // Drop drawing-command lines
+    if (hasDrawingCommand(rawText)) continue;
+
+    const cleanText = stripTags(rawText);
+
+    // Drop empty or junk-only lines
+    if (looksLikeJunk(cleanText)) continue;
+
+    cues.push({ start: assTimeToVtt(start), end: assTimeToVtt(end), text: cleanText });
+  }
+
+  if (!cues.length) return '';
+
+  // ── 5. Deduplicate consecutive identical cues ─────────────────────────────
+  const deduped: Cue[] = [cues[0]];
+  for (let i = 1; i < cues.length; i++) {
+    const prev = deduped[deduped.length - 1];
+    const cur  = cues[i];
+    if (cur.text === prev.text && cur.start === prev.start && cur.end === prev.end) continue;
+    deduped.push(cur);
+  }
+
+  // ── 6. Build VTT output ───────────────────────────────────────────────────
+  const vttLines = ['WEBVTT', ''];
+  for (let i = 0; i < deduped.length; i++) {
+    const { start, end, text } = deduped[i];
+    vttLines.push(`${i + 1}`);
+    vttLines.push(`${start} --> ${end}`);
+    vttLines.push(text);
+    vttLines.push('');
+  }
+
+  return vttLines.join('\n');
+}
+
 function normalizeLanguage(raw?: string): string {
   if (!raw) return 'Unknown';
   const val = raw.toLowerCase();
@@ -453,9 +595,11 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, s
 
   if (!streams.length) return;
 
-  const unsupportedCodecs = new Set([
-    'ass',
-    'ssa',
+  // Codecs that truly cannot be converted to VTT by ffmpeg:
+  // - Bitmap/image-based formats (PGS, DVD, XSUB, DVB) have no text to extract
+  // - DVB teletext is broadcast-only
+  // ASS/SSA are text-based and CAN be converted to VTT — ffmpeg handles this fine.
+  const trulyUnsupportedCodecs = new Set([
     'hdmv_pgs_subtitle',
     'dvd_subtitle',
     'xsub',
@@ -463,13 +607,19 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, s
     'dvb_teletext',
   ]);
 
+  console.log(`[Scanner] Found ${streams.length} subtitle stream(s) in ${path.basename(filePath)}:`, streams.map(s => `${s.codec_name}(${s.tags?.language ?? 'und'})`).join(', '));
+
   let extracted = 0;
   const langCount: Record<string, number> = {};
 
   for (const stream of streams) {
     if (typeof stream?.index !== 'number') continue;
     const codec = String(stream?.codec_name ?? '').toLowerCase();
-    if (unsupportedCodecs.has(codec)) continue;
+
+    if (trulyUnsupportedCodecs.has(codec)) {
+      console.log(`[Scanner] Skipping stream ${stream.index} (${codec}) — bitmap/image-based subtitle, cannot convert to VTT.`);
+      continue;
+    }
 
     const language = normalizeLanguage(stream?.tags?.language);
     langCount[language] = (langCount[language] ?? 0) + 1;
@@ -486,14 +636,45 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, s
       // Doesn't exist yet, extract it.
     }
 
-    const isTextSub = ['subrip', 'srt', 'mov_text'].includes(codec);
+    // ASS/SSA: use our own clean converter instead of ffmpeg's broken ASS→VTT
+    // which leaks drawing commands and karaoke vector paths as visible text.
+    if (codec === 'ass' || codec === 'ssa') {
+      const assResult = await runProcess(ffmpegBin, [
+        '-v', 'error',
+        '-i', fullVideoPath,
+        '-map', `0:${stream.index}`,
+        '-f', 'ass',
+        'pipe:1',
+      ]).catch(() => null);
+
+      if (!assResult || assResult.code !== 0 || !assResult.stdout.trim()) {
+        const reason = assResult?.stderr?.trim().split('\n').pop() ?? 'unknown error';
+        console.warn(`[Scanner] Could not extract ASS stream ${stream.index} from ${path.basename(filePath)} — ${reason}`);
+        continue;
+      }
+
+      const vttContent = convertAssToVtt(assResult.stdout);
+      if (!vttContent) {
+        console.warn(`[Scanner] ASS stream ${stream.index} from ${path.basename(filePath)} had no usable dialogue lines after cleaning — skipped.`);
+        continue;
+      }
+
+      const { writeFile } = await import('fs/promises');
+      await writeFile(vttFilePath, vttContent, 'utf8');
+      console.log(`[Scanner] Extracted subtitle: ${path.join(subtitleRelativePath, vttFileName)}`);
+      extracted++;
+      continue;
+    }
+
+    // All other text-based codecs (subrip, srt, mov_text, webvtt): let ffmpeg convert
+    const needsCodecFlag = ['subrip', 'srt', 'mov_text'].includes(codec);
     const result = await runProcess('nice', [
       '-n', '19',
       ffmpegBin,
       '-v', 'error',
       '-i', fullVideoPath,
       '-map', `0:${stream.index}`,
-      ...(isTextSub ? ['-c:s', 'webvtt'] : []),
+      ...(needsCodecFlag ? ['-c:s', 'webvtt'] : []),
       '-f', 'webvtt',
       vttFilePath,
     ]).catch(() => null);
