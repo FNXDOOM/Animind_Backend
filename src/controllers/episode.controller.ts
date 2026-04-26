@@ -455,7 +455,13 @@ async function getEmbeddedSubtitleTracks(fullVideoPath: string): Promise<Subtitl
     return [];
   }
 
-  const unsupportedCodecs = new Set(['hdmv_pgs_subtitle', 'dvd_subtitle', 'xsub']);
+  const unsupportedCodecs = new Set([
+    'ass',
+    'ssa',
+    'hdmv_pgs_subtitle',
+    'dvd_subtitle',
+    'xsub',
+  ]);
   const tracks: SubtitleTrackPayload[] = [];
 
   for (const stream of streams) {

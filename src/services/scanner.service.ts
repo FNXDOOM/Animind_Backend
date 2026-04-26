@@ -400,7 +400,7 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, s
   try {
     const existingSubtitleEntries = await readdir(subtitlesDir);
     const hasExistingSubtitles = existingSubtitleEntries.some(entry =>
-      ['.vtt', '.srt', '.ass'].includes(path.extname(entry).toLowerCase())
+      ['.vtt', '.srt'].includes(path.extname(entry).toLowerCase())
     );
     if (hasExistingSubtitles) {
       return;
@@ -446,6 +446,8 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, s
   if (!streams.length) return;
 
   const unsupportedCodecs = new Set([
+    'ass',
+    'ssa',
     'hdmv_pgs_subtitle',
     'dvd_subtitle',
     'xsub',
@@ -475,7 +477,7 @@ async function extractSubtitlesToDisk(filePath: string, episodeNumber: number, s
       // Doesn't exist yet, extract it.
     }
 
-    const isTextSub = ['ass', 'ssa', 'subrip', 'srt', 'mov_text'].includes(codec);
+    const isTextSub = ['subrip', 'srt', 'mov_text'].includes(codec);
     const result = await runProcess('nice', [
       '-n', '19',
       ffmpegBin,
