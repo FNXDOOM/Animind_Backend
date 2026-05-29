@@ -15,6 +15,7 @@ export const env = {
 
   // Clerk secret key — used by auth middleware to verify JWTs
   CLERK_SECRET_KEY: requireEnv('CLERK_SECRET_KEY'),
+  DESKTOP_TOKEN_SIGNING_KEY: requireEnv('DESKTOP_TOKEN_SIGNING_KEY'),
 
   SUPABASE_URL: requireEnv('SUPABASE_URL'),
   SUPABASE_SERVICE_ROLE_KEY: requireEnv('SUPABASE_SERVICE_ROLE_KEY'),
@@ -68,4 +69,11 @@ export const env = {
   HLS_SEGMENT_DURATION: parseInt(process.env.HLS_SEGMENT_DURATION ?? '10', 10),
   HLS_MAX_CONCURRENT_SESSIONS: parseInt(process.env.HLS_MAX_CONCURRENT_SESSIONS ?? '2', 10),
   HLS_SESSION_TIMEOUT_MINUTES: parseInt(process.env.HLS_SESSION_TIMEOUT_MINUTES ?? '120', 10),
+
+  // Desktop durable auth
+  DESKTOP_ACCESS_TOKEN_TTL_SECONDS: parseInt(process.env.DESKTOP_ACCESS_TOKEN_TTL_SECONDS ?? '900', 10),
+  DESKTOP_REFRESH_TOKEN_TTL_DAYS: parseInt(process.env.DESKTOP_REFRESH_TOKEN_TTL_DAYS ?? '30', 10),
+  DESKTOP_AUTH_CLEANUP_ENABLED: process.env.DESKTOP_AUTH_CLEANUP_ENABLED !== 'false',
+  DESKTOP_AUTH_CLEANUP_CRON: process.env.DESKTOP_AUTH_CLEANUP_CRON ?? '30 2 * * *',
+  DESKTOP_AUTH_EXPIRED_RETENTION_DAYS: parseInt(process.env.DESKTOP_AUTH_EXPIRED_RETENTION_DAYS ?? '7', 10),
 };

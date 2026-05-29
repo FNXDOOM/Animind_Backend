@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { createClerkClient, verifyToken } from '@clerk/backend';
 import { env } from '../config/env.js';
+import { isDesktopAccessToken, verifyDesktopAccessToken } from '../services/desktopAuth.service.js';
 
 // Clerk client — used to fetch user metadata (isAdmin) after token verification
 const clerk = createClerkClient({
@@ -27,20 +28,28 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   }
 
   try {
-    // verifyToken is a standalone function in @clerk/backend v3+
-    const payload = await verifyToken(token, {
-      secretKey: env.CLERK_SECRET_KEY,
-    });
+    if (isDesktopAccessToken(token)) {
+      const desktop = await verifyDesktopAccessToken(token);
+      if (!desktop?.userId) {
+        res.status(401).json({ error: 'Invalid or expired token.' });
+        return;
+      }
+      req.userId = desktop.userId;
+    } else {
+      // verifyToken is a standalone function in @clerk/backend v3+
+      const payload = await verifyToken(token, {
+        secretKey: env.CLERK_SECRET_KEY,
+      });
 
-    if (!payload?.sub) {
-      res.status(401).json({ error: 'Invalid or expired token.' });
-      return;
+      if (!payload?.sub) {
+        res.status(401).json({ error: 'Invalid or expired token.' });
+        return;
+      }
+      req.userId = payload.sub;
     }
 
-    req.userId = payload.sub;
-
     // Fetch user to check isAdmin from publicMetadata
-    const user = await clerk.users.getUser(payload.sub);
+    const user = await clerk.users.getUser(req.userId);
     req.isAdmin = (user.publicMetadata as { isAdmin?: boolean })?.isAdmin === true;
 
     next();

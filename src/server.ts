@@ -7,6 +7,7 @@ import { runScan } from './services/scanner.service.js';
 import { cleanupEndedWatchParties } from './services/syncplayCleanup.service.js';
 import { destroyAllSessions } from './services/hlsSession.service.js';
 import { cleanupAudioVariantCacheByTtl } from './services/audioCacheCleanup.service.js';
+import { cleanupDesktopAuthSessions } from './services/desktopAuthCleanup.service.js';
 
 // ── HTTP Server ───────────────────────────────────────────────────────────────
 const httpServer = http.createServer(app);
@@ -86,6 +87,36 @@ if (env.AUDIO_CACHE_VARIANT_CLEANUP_ENABLED) {
   } else {
     console.warn(
       `[Server] Invalid AUDIO_CACHE_VARIANT_CLEANUP_CRON expression: "${env.AUDIO_CACHE_VARIANT_CLEANUP_CRON}". Audio cache cleanup cron not scheduled.`
+    );
+  }
+}
+
+// ── Desktop Auth Session Cleanup ────────────────────────────────────────────
+if (env.DESKTOP_AUTH_CLEANUP_ENABLED) {
+  const runDesktopAuthCleanup = async () => {
+    try {
+      const result = await cleanupDesktopAuthSessions(env.DESKTOP_AUTH_EXPIRED_RETENTION_DAYS);
+      if (result.deletedRows > 0) {
+        console.log(
+          `[DesktopAuth Cleanup] Deleted ${result.deletedRows} stale/revoked session row(s) (retention ${env.DESKTOP_AUTH_EXPIRED_RETENTION_DAYS}d).`
+        );
+      }
+    } catch (err: any) {
+      console.error('[DesktopAuth Cleanup] Failed:', err.message);
+    }
+  };
+
+  // One immediate pass on startup.
+  void runDesktopAuthCleanup();
+
+  if (cron.validate(env.DESKTOP_AUTH_CLEANUP_CRON)) {
+    cron.schedule(env.DESKTOP_AUTH_CLEANUP_CRON, runDesktopAuthCleanup);
+    console.log(
+      `[Server] Desktop auth cleanup cron scheduled: "${env.DESKTOP_AUTH_CLEANUP_CRON}" (retention ${env.DESKTOP_AUTH_EXPIRED_RETENTION_DAYS}d)`
+    );
+  } else {
+    console.warn(
+      `[Server] Invalid DESKTOP_AUTH_CLEANUP_CRON expression: "${env.DESKTOP_AUTH_CLEANUP_CRON}". Desktop auth cleanup cron not scheduled.`
     );
   }
 }

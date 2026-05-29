@@ -12,6 +12,11 @@ import { rescanLibrary, storageWebhook } from '../controllers/scanner.controller
 import { listUsers, setAdminStatus, deleteShow, triggerAdminScan } from '../controllers/admin.controller.js';
 import { deleteMyAccount } from '../controllers/account.controller.js';
 import { signUpWithServiceRole, loginWithPassword, getGoogleAuthUrl } from '../controllers/auth.controller.js';
+import {
+  exchangeClerkForDesktopSession,
+  refreshDesktopSession,
+  revokeDesktopSession,
+} from '../controllers/desktopAuth.controller.js';
 import { requireAuth, requireAdmin, AuthRequest } from '../middleware/auth.middleware.js';
 import { createIpRateLimiter } from '../middleware/rateLimit.middleware.js';
 
@@ -28,6 +33,9 @@ router.get('/shows/:id', getShowById);
 router.post('/auth/signup', signupRateLimit as any, signUpWithServiceRole);
 router.post('/auth/login', loginRateLimit as any, loginWithPassword);
 router.get('/auth/google-url', getGoogleAuthUrl);
+router.post('/auth/desktop/exchange', loginRateLimit as any, exchangeClerkForDesktopSession);
+router.post('/auth/desktop/refresh', loginRateLimit as any, refreshDesktopSession);
+router.post('/auth/desktop/revoke', revokeDesktopSession);
 
 // Manual library rescan — called by "Scan Cloud Storage" button in App.tsx
 router.post('/rescan', rescanRateLimit as any, requireAuth as any, requireAdmin as any, rescanLibrary);

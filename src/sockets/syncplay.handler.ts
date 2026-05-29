@@ -18,8 +18,10 @@
 
 import { Server as HttpServer } from 'http';
 import { Server as SocketServer, Socket } from 'socket.io';
+import { verifyToken } from '@clerk/backend';
 import { env } from '../config/env.js';
 import { supabase } from '../config/db.js';
+import { isDesktopAccessToken, verifyDesktopAccessToken } from '../services/desktopAuth.service.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -169,6 +171,22 @@ function generateRoomCode(): string {
 
 async function verifySocketToken(token: string): Promise<string | null> {
   if (!token) return null;
+
+  if (isDesktopAccessToken(token)) {
+    const desktop = await verifyDesktopAccessToken(token);
+    return desktop?.userId ?? null;
+  }
+
+  try {
+    const payload = await verifyToken(token, {
+      secretKey: env.CLERK_SECRET_KEY,
+    });
+
+    if (payload?.sub) return payload.sub;
+  } catch {
+    // Fall through to Supabase verification for legacy clients.
+  }
+
   const { data, error } = await supabase.auth.getUser(token);
   if (error || !data.user) return null;
   return data.user.id;

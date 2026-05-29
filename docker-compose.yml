@@ -55,3 +55,9 @@ services:
     # ── Local storage volume ─────────────────────────────────────────────────
     volumes:
       - /mnt/anime:/mnt/anime
+    networks:
+      - npm-network
+
+networks:
+  npm-network:
+    external: true
