@@ -14,10 +14,13 @@ import { supabase } from '../config/db.js';
 import { parseFolderPath } from '../utils/titleParser.js';
 import { fetchAnimeMeta } from './animeMetadata.service.js';
 import type { AnimeMetadata } from './animeMetadata.service.js';
+import { inferAnimeScanWithOpenRouter } from './openrouterScanner.service.js';
+import type { ScannerContentType } from './openrouterScanner.service.js';
 
 // ── S3 Client (lazy-initialized) ────────────────────────────────────────────
 let s3Client: S3Client | null = null;
 let hasWarnedMissingEpisodeSeasonSchema = false;
+let hasWarnedMissingEpisodeScannerMetadataSchema = false;
 
 function getS3Client(): S3Client {
   if (!s3Client) {
@@ -105,6 +108,9 @@ type ParsedScanFile = {
   title: string;
   episode: number;
   season?: number;
+  contentType?: ScannerContentType;
+  parserSource: 'deterministic' | 'openrouter';
+  parserConfidence?: number;
 };
 
 function normalizeTitleForLookup(title: string): string {
@@ -114,6 +120,74 @@ function normalizeTitleForLookup(title: string): string {
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizeRelativePath(filePath: string): string {
+  return filePath.replace(/\\/g, '/');
+}
+
+function getSiblingFileNames(filePath: string, allFilePaths: string[]): string[] {
+  const normalized = normalizeRelativePath(filePath);
+  const dir = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : '';
+
+  return allFilePaths
+    .map(normalizeRelativePath)
+    .filter(candidate => {
+      const candidateDir = candidate.includes('/') ? candidate.slice(0, candidate.lastIndexOf('/')) : '';
+      return candidateDir === dir;
+    })
+    .map(candidate => candidate.split('/').pop() ?? candidate)
+    .filter(Boolean);
+}
+
+function seasonForContentType(season: number | undefined, contentType?: ScannerContentType): number {
+  if (typeof season === 'number' && Number.isFinite(season)) return season;
+  return contentType && contentType !== 'tv' && contentType !== 'unknown' ? 0 : 1;
+}
+
+async function parseScanFile(filePath: string, allFilePaths: string[]): Promise<ParsedScanFile | null> {
+  const deterministic = parseFolderPath(filePath);
+
+  if (deterministic) {
+    return {
+      filePath,
+      title: deterministic.title,
+      episode: deterministic.episode,
+      season: seasonForContentType(deterministic.season, deterministic.contentType),
+      contentType: deterministic.contentType ?? 'tv',
+      parserSource: 'deterministic',
+    };
+  }
+
+  const llmGuess = await inferAnimeScanWithOpenRouter({
+    relativePath: normalizeRelativePath(filePath),
+    siblingFileNames: getSiblingFileNames(filePath, allFilePaths),
+    deterministicGuess: null,
+  });
+
+  if (!llmGuess) return null;
+  if (llmGuess.confidence < env.OPENROUTER_MIN_CONFIDENCE) {
+    console.warn(
+      `[Scanner] Low-confidence OpenRouter parse for ${filePath}: ${llmGuess.confidence.toFixed(2)} (${llmGuess.reason ?? 'no reason'})`
+    );
+    return null;
+  }
+  if (!llmGuess.title || llmGuess.episode === null) {
+    console.warn(
+      `[Scanner] OpenRouter could not produce insertable episode metadata for ${filePath}: ${llmGuess.reason ?? 'missing title or episode'}`
+    );
+    return null;
+  }
+
+  return {
+    filePath,
+    title: llmGuess.title,
+    episode: llmGuess.episode,
+    season: seasonForContentType(llmGuess.season ?? undefined, llmGuess.contentType),
+    contentType: llmGuess.contentType,
+    parserSource: 'openrouter',
+    parserConfidence: llmGuess.confidence,
+  };
 }
 
 function scoreShowCandidate(row: {
@@ -320,26 +394,71 @@ async function upsertEpisode(
   seasonNumber: number,
   episodeNumber: number,
   filePath: string,
-  bucketName: string
+  bucketName: string,
+  scanMeta?: {
+    contentType?: ScannerContentType;
+    originalTitle?: string;
+    scannerSource?: ParsedScanFile['parserSource'];
+    scannerConfidence?: number;
+  }
 ): Promise<{ id: string; file_path: string } | null> {
-  const normalizedSeasonNumber = Number.isFinite(seasonNumber) && seasonNumber > 0
+  const normalizedSeasonNumber = Number.isFinite(seasonNumber) && seasonNumber >= 0
     ? Math.floor(seasonNumber)
     : 1;
+  const contentType = scanMeta?.contentType ?? 'tv';
+  const scannerMetadataPayload = {
+    content_type: contentType,
+    original_title: scanMeta?.originalTitle ?? null,
+    scanner_source: scanMeta?.scannerSource ?? null,
+    scanner_confidence: scanMeta?.scannerConfidence ?? null,
+  };
+  const episodePayload = {
+    show_id: showId,
+    season_number: normalizedSeasonNumber,
+    episode_number: episodeNumber,
+    file_path: filePath,
+    bucket_name: bucketName,
+    ...scannerMetadataPayload,
+  };
 
   let { data, error } = await supabase
     .from('episodes')
-    .upsert(
-      {
-        show_id: showId,
-        season_number: normalizedSeasonNumber,
-        episode_number: episodeNumber,
-        file_path: filePath,
-        bucket_name: bucketName,
-      },
-      { onConflict: 'show_id,season_number,episode_number' }
-    )
+    .upsert(episodePayload, { onConflict: 'show_id,season_number,content_type,episode_number' })
     .select('id, file_path')
     .single();
+
+  if (error) {
+    const isScannerMetadataSchemaIssue =
+      /content_type|original_title|scanner_source|scanner_confidence/i.test(error.message) ||
+      /show_id,season_number,content_type,episode_number/i.test(error.message);
+
+    if (isScannerMetadataSchemaIssue) {
+      if (!hasWarnedMissingEpisodeScannerMetadataSchema) {
+        hasWarnedMissingEpisodeScannerMetadataSchema = true;
+        console.warn(
+          '[Scanner] episodes scanner metadata schema is missing. Run the content_type scanner migration to separate TV, OVA, ONA, specials, and movies.'
+        );
+      }
+
+      const fallback = await supabase
+        .from('episodes')
+        .upsert(
+          {
+            show_id: showId,
+            season_number: normalizedSeasonNumber,
+            episode_number: episodeNumber,
+            file_path: filePath,
+            bucket_name: bucketName,
+          },
+          { onConflict: 'show_id,season_number,episode_number' }
+        )
+        .select('id, file_path')
+        .single();
+
+      data = fallback.data;
+      error = fallback.error;
+    }
+  }
 
   if (error) {
     const isSeasonSchemaIssue =
@@ -847,7 +966,7 @@ export async function runScan(): Promise<ScanResult> {
     result.scanned++;
     foundPaths.add(filePath);
 
-    const parsed = parseFolderPath(filePath);
+    const parsed = await parseScanFile(filePath, filePaths);
     if (!parsed) {
       console.warn(`[Scanner] Could not parse: ${filePath}`);
       result.errors.push(`Unparseable: ${filePath}`);
@@ -867,6 +986,9 @@ export async function runScan(): Promise<ScanResult> {
       title: parsed.title,
       episode: parsed.episode,
       season: parsed.season,
+      contentType: parsed.contentType,
+      parserSource: parsed.parserSource,
+      parserConfidence: parsed.parserConfidence,
     };
 
     if (group) {
@@ -898,7 +1020,13 @@ export async function runScan(): Promise<ScanResult> {
           file.season ?? 1,
           file.episode,
           file.filePath,
-          env.STORAGE_MODE === 's3' ? env.S3_BUCKET_NAME : 'local'
+          env.STORAGE_MODE === 's3' ? env.S3_BUCKET_NAME : 'local',
+          {
+            contentType: file.contentType,
+            originalTitle: file.title,
+            scannerSource: file.parserSource,
+            scannerConfidence: file.parserConfidence,
+          }
         );
 
         if (upsertedEpisode?.id) {

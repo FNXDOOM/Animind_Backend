@@ -64,6 +64,15 @@ export const env = {
   MYANIMELIST_ENABLED: process.env.MYANIMELIST_ENABLED !== 'false',
   MYANIMELIST_CLIENT_ID: process.env.MYANIMELIST_CLIENT_ID ?? process.env.MAL_CLIENT_ID ?? '',
 
+  // OpenRouter scanner fallback
+  OPENROUTER_ENABLED: process.env.OPENROUTER_ENABLED === 'true',
+  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ?? '',
+  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL ?? 'openai/gpt-4o-mini',
+  OPENROUTER_SITE_URL: process.env.OPENROUTER_SITE_URL ?? process.env.FRONTEND_URL?.split(',')?.[0] ?? '',
+  OPENROUTER_APP_NAME: process.env.OPENROUTER_APP_NAME ?? 'Animind',
+  OPENROUTER_TIMEOUT_MS: parseInt(process.env.OPENROUTER_TIMEOUT_MS ?? '12000', 10),
+  OPENROUTER_MIN_CONFIDENCE: parseFloat(process.env.OPENROUTER_MIN_CONFIDENCE ?? '0.72'),
+
   // Audio variant cache cleanup
   AUDIO_CACHE_VARIANT_CLEANUP_ENABLED: process.env.AUDIO_CACHE_VARIANT_CLEANUP_ENABLED !== 'false',
   AUDIO_CACHE_VARIANT_CLEANUP_CRON: process.env.AUDIO_CACHE_VARIANT_CLEANUP_CRON ?? '15 */6 * * *',

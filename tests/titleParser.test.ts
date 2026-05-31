@@ -27,4 +27,22 @@ describe('titleParser season-aware parsing', () => {
     expect(parsed?.episode).toBe(2);
     expect(parsed?.season).toBe(3);
   });
+
+  it('reads embedded season markers from noisy release folder names', () => {
+    const parsed = parseFolderPath(
+      "Frieren.Beyond.Journey's.End.S01.2160p.WEB-DL.Multi.AUDIO.x265.Multi.Subs/Frieren - 04.mkv"
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.title).toBe("Frieren Beyond Journey's End");
+    expect(parsed?.episode).toBe(4);
+    expect(parsed?.season).toBe(1);
+  });
+
+  it('classifies special release folders as non-tv content', () => {
+    const parsed = parseFolderPath('Frieren Specials/Frieren - 01.mkv');
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.contentType).toBe('special');
+  });
 });

@@ -12,6 +12,7 @@ export interface ParsedAnime {
   title: string;
   episode: number;
   season?: number;
+  contentType?: 'tv' | 'ova' | 'ona' | 'special' | 'movie';
   quality?: string;
   group?: string;
 }
@@ -98,9 +99,21 @@ function extractSeasonFromPathParts(parts: string[]): number | undefined {
 
     match = part.match(/^s(\d{1,2})$/i);
     if (match) return parseInt(match[1], 10);
+
+    match = part.replace(/[._-]+/g, ' ').match(/\bs(\d{1,2})\b/i);
+    if (match) return parseInt(match[1], 10);
   }
 
   return undefined;
+}
+
+function inferContentTypeFromPathParts(parts: string[]): ParsedAnime['contentType'] {
+  const text = parts.join(' ').replace(/[._-]+/g, ' ').toLowerCase();
+  if (/\b(movie|film|theatrical)\b/.test(text)) return 'movie';
+  if (/\b(ova|oad)\b/.test(text)) return 'ova';
+  if (/\bona\b/.test(text)) return 'ona';
+  if (/\b(special|specials|sp|extra|extras)\b/.test(text)) return 'special';
+  return 'tv';
 }
 
 function stripSeasonSuffix(title: string): string {
@@ -147,6 +160,7 @@ export function parseFolderPath(relativePath: string): ParsedAnime | null {
   const filename = parts[parts.length - 1];
   const folderTitle = parts.length > 1 ? parts[0] : null;
   const seasonFromPath = extractSeasonFromPathParts(parts.slice(0, -1));
+  const contentType = inferContentTypeFromPathParts(parts);
 
   const parsed = parseAnimeFilename(filename);
   if (!parsed) return null;
@@ -154,6 +168,8 @@ export function parseFolderPath(relativePath: string): ParsedAnime | null {
   if (!parsed.season && seasonFromPath) {
     parsed.season = seasonFromPath;
   }
+
+  parsed.contentType = parsed.contentType ?? contentType;
 
   // Prefer folder name as title if it looks meaningful
   if (folderTitle && folderTitle.length > 1 && !/^season/i.test(folderTitle)) {

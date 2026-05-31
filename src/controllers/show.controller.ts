@@ -112,7 +112,7 @@ export async function getShowById(req: Request, res: Response) {
   // 1000 rows, which would silently truncate shows with many episodes.
   const { data: episodesRaw, error: epError } = await supabase
     .from('episodes')
-    .select('id, season_number, episode_number, title, duration, created_at')
+    .select('id, season_number, content_type, episode_number, title, duration, created_at')
     .eq('show_id', id)
     .order('season_number', { ascending: true })
     .order('episode_number', { ascending: true })
@@ -138,7 +138,7 @@ export async function getShowById(req: Request, res: Response) {
 
   const normalizeSeason = (n: number | null): number => {
     if (n === null || n === undefined || !Number.isFinite(n)) return 1;
-    return Math.max(1, Math.trunc(n));
+    return Math.max(0, Math.trunc(n));
   };
 
   const seen = new Set<string>();
@@ -151,7 +151,7 @@ export async function getShowById(req: Request, res: Response) {
     .filter(ep => {
       // Skip rows with no episode number rather than merging them all at 0
       if (ep.episode_number === null) return false;
-      const key = `${ep.season_number}:${ep.episode_number}`;
+      const key = `${ep.season_number}:${ep.content_type ?? 'tv'}:${ep.episode_number}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
