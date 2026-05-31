@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 const ANILIST_API = 'https://graphql.anilist.co';
 const ANILIST_REQUEST_TIMEOUT_MS = 8000;
 const ANILIST_MAX_ATTEMPTS = 3;
+let rateLimitedUntil = 0;
 
 export interface AniListMedia {
   id: number;
@@ -62,9 +63,22 @@ function getAniListErrorSummary(err: any): string {
   return err?.message ?? 'unknown error';
 }
 
+function updateAniListRateLimitCooldown(err: any): void {
+  if (err?.response?.status !== 429) return;
+
+  const retryAfterHeader = err?.response?.headers?.['retry-after'];
+  const retryAfterSeconds = Number.parseInt(String(retryAfterHeader ?? ''), 10);
+  const cooldownMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+    ? retryAfterSeconds * 1000
+    : 60_000;
+
+  rateLimitedUntil = Math.max(rateLimitedUntil, Date.now() + cooldownMs);
+}
+
 /** Fetch AniList metadata for an anime title. Returns null if not found or AniList disabled. */
 export async function fetchAniListMeta(title: string): Promise<AniListMedia | null> {
   if (!env.ANILIST_ENABLED) return null;
+  if (Date.now() < rateLimitedUntil) return null;
 
   for (let attempt = 1; attempt <= ANILIST_MAX_ATTEMPTS; attempt++) {
     try {
@@ -81,6 +95,7 @@ export async function fetchAniListMeta(title: string): Promise<AniListMedia | nu
     } catch (err: any) {
       const transient = isTransientAniListError(err);
       const shouldRetry = transient && attempt < ANILIST_MAX_ATTEMPTS;
+      updateAniListRateLimitCooldown(err);
 
       if (shouldRetry) {
         const backoffMs = 300 * Math.pow(2, attempt - 1);

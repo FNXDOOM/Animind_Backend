@@ -60,6 +60,10 @@ export const env = {
   // AniList
   ANILIST_ENABLED: process.env.ANILIST_ENABLED !== 'false',
 
+  // MyAnimeList fallback metadata enrichment
+  MYANIMELIST_ENABLED: process.env.MYANIMELIST_ENABLED !== 'false',
+  MYANIMELIST_CLIENT_ID: process.env.MYANIMELIST_CLIENT_ID ?? process.env.MAL_CLIENT_ID ?? '',
+
   // Audio variant cache cleanup
   AUDIO_CACHE_VARIANT_CLEANUP_ENABLED: process.env.AUDIO_CACHE_VARIANT_CLEANUP_ENABLED !== 'false',
   AUDIO_CACHE_VARIANT_CLEANUP_CRON: process.env.AUDIO_CACHE_VARIANT_CLEANUP_CRON ?? '15 */6 * * *',

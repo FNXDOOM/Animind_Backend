@@ -12,7 +12,8 @@ import path from 'path';
 import { env } from '../config/env.js';
 import { supabase } from '../config/db.js';
 import { parseFolderPath } from '../utils/titleParser.js';
-import { fetchAniListMeta } from './anilist.service.js';
+import { fetchAnimeMeta } from './animeMetadata.service.js';
+import type { AnimeMetadata } from './animeMetadata.service.js';
 
 // ── S3 Client (lazy-initialized) ────────────────────────────────────────────
 let s3Client: S3Client | null = null;
@@ -82,6 +83,30 @@ async function listLocalFiles(dir: string, base = dir): Promise<string[]> {
 
 // ── DB Operations ────────────────────────────────────────────────────────────
 
+type ShowMetadataRow = {
+  id: string;
+  title?: string | null;
+  synopsis?: string | null;
+  cover_image_url?: string | null;
+  anilist_id?: number | null;
+  genres?: string[] | null;
+  rating?: number | null;
+  episode_count?: number | null;
+  studio?: string | null;
+  status?: string | null;
+  year?: string | null;
+  trailer_id?: string | null;
+  trailer_site?: string | null;
+  trailer_thumbnail?: string | null;
+};
+
+type ParsedScanFile = {
+  filePath: string;
+  title: string;
+  episode: number;
+  season?: number;
+};
+
 function normalizeTitleForLookup(title: string): string {
   return title
     .toLowerCase()
@@ -110,32 +135,116 @@ function scoreShowCandidate(row: {
   return score;
 }
 
+function hasValue(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  return value !== null && value !== undefined && value !== '';
+}
+
+function isShowMissingMetadata(row: ShowMetadataRow): boolean {
+  return !hasValue(row.cover_image_url) ||
+    !hasValue(row.synopsis) ||
+    !hasValue(row.genres) ||
+    !hasValue(row.rating) ||
+    !hasValue(row.episode_count) ||
+    !hasValue(row.studio) ||
+    !hasValue(row.status) ||
+    !hasValue(row.year) ||
+    !hasValue(row.anilist_id);
+}
+
+function buildShowInsertPayload(meta: AnimeMetadata | null, fallbackTitle: string) {
+  return {
+    title: meta?.title ?? fallbackTitle,
+    synopsis: meta?.synopsis ?? null,
+    cover_image_url: meta?.coverImageUrl ?? null,
+    anilist_id: meta?.anilistId ?? null,
+    genres: meta?.genres ?? [],
+    rating: meta?.rating ?? null,
+    episode_count: meta?.episodeCount ?? null,
+    studio: meta?.studio ?? null,
+    status: meta?.status ?? null,
+    year: meta?.year ?? null,
+    trailer_id: meta?.trailer?.id ?? null,
+    trailer_site: meta?.trailer?.site ?? null,
+    trailer_thumbnail: meta?.trailer?.thumbnail ?? null,
+  };
+}
+
+function buildShowMetadataPatch(row: ShowMetadataRow, meta: AnimeMetadata): Partial<ShowMetadataRow> {
+  const patch: Partial<ShowMetadataRow> = {};
+
+  if (!hasValue(row.synopsis) && meta.synopsis) patch.synopsis = meta.synopsis;
+  if (!hasValue(row.cover_image_url) && meta.coverImageUrl) patch.cover_image_url = meta.coverImageUrl;
+  if (!hasValue(row.anilist_id) && meta.anilistId) patch.anilist_id = meta.anilistId;
+  if (!hasValue(row.genres) && meta.genres.length > 0) patch.genres = meta.genres;
+  if (!hasValue(row.rating) && meta.rating !== null) patch.rating = meta.rating;
+  if (!hasValue(row.episode_count) && meta.episodeCount !== null) patch.episode_count = meta.episodeCount;
+  if (!hasValue(row.studio) && meta.studio) patch.studio = meta.studio;
+  if (!hasValue(row.status) && meta.status) patch.status = meta.status;
+  if (!hasValue(row.year) && meta.year) patch.year = meta.year;
+  if (!hasValue(row.trailer_id) && meta.trailer?.id) {
+    patch.trailer_id = meta.trailer.id;
+    patch.trailer_site = meta.trailer.site;
+    patch.trailer_thumbnail = meta.trailer.thumbnail;
+  }
+
+  return patch;
+}
+
+async function refreshShowMetadataIfMissing(row: ShowMetadataRow, parsedTitle: string): Promise<void> {
+  if (!isShowMissingMetadata(row)) return;
+
+  const meta = await fetchAnimeMeta(parsedTitle);
+  if (!meta) return;
+
+  const patch = buildShowMetadataPatch(row, meta);
+  if (Object.keys(patch).length === 0) return;
+
+  const { error } = await supabase
+    .from('shows')
+    .update(patch)
+    .eq('id', row.id);
+
+  if (error) {
+    console.warn(`[Scanner] Could not refresh metadata for "${row.title ?? parsedTitle}": ${error.message}`);
+  } else {
+    console.log(`[Scanner] Refreshed missing metadata for "${row.title ?? parsedTitle}" via ${meta.source}.`);
+  }
+}
+
 async function getOrCreateShow(title: string): Promise<string> {
   const trimmed = title.trim();
 
   // 1. Quick lookup by the raw parsed title (covers most cases)
   const { data: existing } = await supabase
     .from('shows')
-    .select('id')
+    .select('id, title, synopsis, cover_image_url, anilist_id, genres, rating, episode_count, studio, status, year, trailer_id, trailer_site, trailer_thumbnail')
     .ilike('title', trimmed)
     .maybeSingle();
 
-  if (existing?.id) return existing.id;
+  if (existing?.id) {
+    await refreshShowMetadataIfMissing(existing, trimmed);
+    return existing.id;
+  }
 
-  // 2. Fetch AniList metadata — this gives us the canonical title
-  const meta = await fetchAniListMeta(trimmed);
-  const canonicalTitle = meta?.title?.english ?? meta?.title?.romaji ?? trimmed;
+  // 2. Fetch external metadata. AniList is tried first; MyAnimeList can fill in
+  //    metadata when AniList rate-limits or fails.
+  const meta = await fetchAnimeMeta(trimmed);
+  const canonicalTitle = meta?.title ?? trimmed;
 
   // 2a. Strong identity match by AniList id when available.
-  if (meta?.id) {
+  if (meta?.anilistId) {
     const { data: byAniList } = await supabase
       .from('shows')
-      .select('id')
-      .eq('anilist_id', meta.id)
+      .select('id, title, synopsis, cover_image_url, anilist_id, genres, rating, episode_count, studio, status, year, trailer_id, trailer_site, trailer_thumbnail')
+      .eq('anilist_id', meta.anilistId)
       .limit(1)
       .maybeSingle();
 
-    if (byAniList?.id) return byAniList.id;
+    if (byAniList?.id) {
+      await refreshShowMetadataIfMissing(byAniList, trimmed);
+      return byAniList.id;
+    }
   }
 
   // 3. If the canonical title differs from the parsed title, check again.
@@ -145,11 +254,14 @@ async function getOrCreateShow(title: string): Promise<string> {
   if (canonicalTitle.toLowerCase() !== trimmed.toLowerCase()) {
     const { data: byCanonical } = await supabase
       .from('shows')
-      .select('id')
+      .select('id, title, synopsis, cover_image_url, anilist_id, genres, rating, episode_count, studio, status, year, trailer_id, trailer_site, trailer_thumbnail')
       .ilike('title', canonicalTitle)
       .maybeSingle();
 
-    if (byCanonical?.id) return byCanonical.id;
+    if (byCanonical?.id) {
+      await refreshShowMetadataIfMissing(byCanonical, trimmed);
+      return byCanonical.id;
+    }
   }
 
   // 3b. If AniList is unavailable or title mismatch remains, use a conservative
@@ -165,25 +277,14 @@ async function getOrCreateShow(title: string): Promise<string> {
     if (fuzzyMatches?.length) {
       const best = [...fuzzyMatches]
         .sort((a, b) => scoreShowCandidate(b, trimmed) - scoreShowCandidate(a, trimmed))[0];
-      if (best?.id) return best.id;
+      if (best?.id) {
+        await refreshShowMetadataIfMissing(best, trimmed);
+        return best.id;
+      }
     }
   }
 
-  const showPayload = {
-    title: canonicalTitle,
-    synopsis: meta?.description?.replace(/<[^>]+>/g, '') ?? null,
-    cover_image_url: meta?.coverImage?.large ?? null,
-    anilist_id: meta?.id ?? null,
-    genres: meta?.genres ?? [],
-    rating: meta?.averageScore ? meta.averageScore / 10 : null,
-    episode_count: meta?.episodes ?? null,
-    studio: meta?.studios?.nodes?.[0]?.name ?? null,
-    status: meta?.status ?? null,
-    year: meta?.seasonYear?.toString() ?? null,
-    trailer_id: meta?.trailer?.id ?? null,
-    trailer_site: meta?.trailer?.site ?? null,
-    trailer_thumbnail: meta?.trailer?.thumbnail ?? null,
-  };
+  const showPayload = buildShowInsertPayload(meta, canonicalTitle);
 
   // Try a plain INSERT first. If it fails due to a unique violation (race condition
   // where another scan inserted the same show between our lookup and now), we fall
@@ -740,6 +841,8 @@ export async function runScan(): Promise<ScanResult> {
 
   console.log(`[Scanner] Found ${filePaths.length} video file(s).`);
 
+  const filesByShow = new Map<string, { title: string; files: ParsedScanFile[] }>();
+
   for (const filePath of filePaths) {
     result.scanned++;
     foundPaths.add(filePath);
@@ -751,32 +854,70 @@ export async function runScan(): Promise<ScanResult> {
       continue;
     }
 
+    const showKey = normalizeTitleForLookup(parsed.title);
+    if (!showKey) {
+      console.warn(`[Scanner] Could not derive show title: ${filePath}`);
+      result.errors.push(`Missing show title: ${filePath}`);
+      continue;
+    }
+
+    const group = filesByShow.get(showKey);
+    const parsedFile: ParsedScanFile = {
+      filePath,
+      title: parsed.title,
+      episode: parsed.episode,
+      season: parsed.season,
+    };
+
+    if (group) {
+      group.files.push(parsedFile);
+    } else {
+      filesByShow.set(showKey, { title: parsed.title, files: [parsedFile] });
+    }
+  }
+
+  console.log(`[Scanner] Parsed ${filesByShow.size} show group(s) from ${result.scanned} video file(s).`);
+
+  for (const group of filesByShow.values()) {
+    let showId: string;
+
     try {
-      const showId = await getOrCreateShow(parsed.title);
-      const upsertedEpisode = await upsertEpisode(
-        showId,
-        parsed.season ?? 1,
-        parsed.episode,
-        filePath,
-        env.STORAGE_MODE === 's3' ? env.S3_BUCKET_NAME : 'local'
-      );
-
-      if (upsertedEpisode?.id) {
-        result.processedEpisodes.push({ id: upsertedEpisode.id, filePath: upsertedEpisode.file_path });
-      }
-
-      result.inserted++;
-
-      // Extract embedded subtitles to .vtt files next to the video.
-      // Awaited sequentially — on a 2-core/1GB VPS running concurrent ffmpeg
-      // processes causes CPU/memory spikes that kill streaming for active users.
-      // Already-extracted .vtt files are skipped on subsequent scans.
-      await extractSubtitlesToDisk(filePath, parsed.episode, parsed.season).catch((err: any) =>
-        console.error(`[Scanner] Subtitle extraction error for ${filePath}:`, err.message)
-      );
+      showId = await getOrCreateShow(group.title);
     } catch (err: any) {
-      console.error(`[Scanner] Error processing ${filePath}:`, err.message);
-      result.errors.push(`${filePath}: ${err.message}`);
+      console.error(`[Scanner] Error resolving show "${group.title}":`, err.message);
+      for (const file of group.files) {
+        result.errors.push(`${file.filePath}: ${err.message}`);
+      }
+      continue;
+    }
+
+    for (const file of group.files) {
+      try {
+        const upsertedEpisode = await upsertEpisode(
+          showId,
+          file.season ?? 1,
+          file.episode,
+          file.filePath,
+          env.STORAGE_MODE === 's3' ? env.S3_BUCKET_NAME : 'local'
+        );
+
+        if (upsertedEpisode?.id) {
+          result.processedEpisodes.push({ id: upsertedEpisode.id, filePath: upsertedEpisode.file_path });
+        }
+
+        result.inserted++;
+
+        // Extract embedded subtitles to .vtt files next to the video.
+        // Awaited sequentially — on a 2-core/1GB VPS running concurrent ffmpeg
+        // processes causes CPU/memory spikes that kill streaming for active users.
+        // Already-extracted .vtt files are skipped on subsequent scans.
+        await extractSubtitlesToDisk(file.filePath, file.episode, file.season).catch((err: any) =>
+          console.error(`[Scanner] Subtitle extraction error for ${file.filePath}:`, err.message)
+        );
+      } catch (err: any) {
+        console.error(`[Scanner] Error processing ${file.filePath}:`, err.message);
+        result.errors.push(`${file.filePath}: ${err.message}`);
+      }
     }
   }
 
