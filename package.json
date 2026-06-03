@@ -14,17 +14,18 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.893.0",
-    "@aws-sdk/s3-request-presigner": "^3.600.0",
-    "@clerk/backend": "^3.2.13",
-    "@supabase/supabase-js": "^2.43.0",
-    "axios": "^1.7.2",
+    "@aws-sdk/client-s3": "^3.1060.0",
+    "@aws-sdk/s3-request-presigner": "^3.1060.0",
+    "@clerk/backend": "^3.4.14",
+    "@supabase/supabase-js": "^2.107.0",
+    "axios": "^1.17.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "node-cron": "^3.0.3",
-    "socket.io": "^4.7.5",
-    "uuid": "^10.0.0"
+    "express": "^4.22.2",
+    "node-cron": "^4.2.1",
+    "socket.io": "^4.8.3",
+    "uuid": "^11.1.1",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -36,6 +37,6 @@
     "supertest": "^7.1.4",
     "tsx": "^4.15.6",
     "typescript": "^5.4.5",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.8"
   }
 }

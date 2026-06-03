@@ -120,6 +120,8 @@ beforeAll(async () => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'service-role-key';
   process.env.WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'test-webhook-secret';
   process.env.FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+  process.env.DESKTOP_TOKEN_SIGNING_KEY =
+    process.env.DESKTOP_TOKEN_SIGNING_KEY || 'test-desktop-token-signing-key-at-least-32-chars';
 
   ({ default: app } = await import('../src/app'));
 });
