@@ -53,7 +53,8 @@ interface HlsSession {
  * segments that ExoPlayer cannot decode. Always transcode those to AAC.
  */
 const HLS_MPEGTS_COPY_SAFE_CODECS = new Set(['aac', 'mp3']);
-const HLS_ROOT_DIR = path.join(os.tmpdir(), 'animind-hls');
+const HLS_ROOT_DIR = path.resolve(os.tmpdir(), 'animind-hls');
+const LOCAL_STORAGE_ROOT_DIR = path.resolve(env.LOCAL_STORAGE_PATH);
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -77,6 +78,34 @@ function isMpegTsCopySafeCodec(codec?: string): boolean {
 
 function generateSessionId(): string {
   return crypto.randomBytes(16).toString('hex');
+}
+
+function assertPathWithinRoot(filePath: string, rootDir: string): string {
+  const root = path.resolve(rootDir);
+  const resolved = path.resolve(filePath);
+  const relative = path.relative(root, resolved);
+  if (relative && (relative.startsWith('..') || path.isAbsolute(relative))) {
+    throw new Error('Unsafe file path outside allowed root.');
+  }
+  return resolved;
+}
+
+function resolveWithinRoot(rootDir: string, ...segments: string[]): string {
+  return assertPathWithinRoot(path.resolve(rootDir, ...segments), rootDir);
+}
+
+function getSessionDir(sessionId: string): string {
+  if (!/^[a-f0-9]{32}$/.test(sessionId)) {
+    throw new Error('Invalid HLS session id.');
+  }
+  return resolveWithinRoot(HLS_ROOT_DIR, sessionId);
+}
+
+function getSegmentFilePath(sessionDir: string, segmentName: string): string | null {
+  if (!/^seg\d{5}\.ts$/.test(segmentName)) {
+    return null;
+  }
+  return resolveWithinRoot(sessionDir, segmentName);
 }
 
 function runProcess(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -179,6 +208,8 @@ export async function createSession(
   audioTrackIndex: number,
   startTime = 0,
 ): Promise<{ sessionId: string; playlistUrl: string }> {
+  const safeSourcePath = assertPathWithinRoot(sourcePath, LOCAL_STORAGE_ROOT_DIR);
+
   // Enforce concurrency limit
   const activeSessions = Array.from(sessions.values()).filter(s => !s.destroying);
   if (activeSessions.length >= env.HLS_MAX_CONCURRENT_SESSIONS) {
@@ -191,20 +222,20 @@ export async function createSession(
   }
 
   const sessionId = generateSessionId();
-  const sessionDir = path.join(HLS_ROOT_DIR, sessionId);
+  const sessionDir = getSessionDir(sessionId);
   await mkdir(sessionDir, { recursive: true });
 
-  const playlistPath = path.join(sessionDir, 'playlist.m3u8');
-  const segmentPattern = path.join(sessionDir, 'seg%05d.ts');
+  const playlistPath = resolveWithinRoot(sessionDir, 'playlist.m3u8');
+  const segmentPattern = resolveWithinRoot(sessionDir, 'seg%05d.ts');
 
   // Determine audio encoding strategy.
   // Only AAC and MP3 can be stream-copied into MPEG-TS; Opus/Vorbis must be transcoded.
-  const codec = await getAudioStreamCodec(sourcePath, audioTrackIndex).catch(() => null);
+  const codec = await getAudioStreamCodec(safeSourcePath, audioTrackIndex).catch(() => null);
   const canCopyAudio = isMpegTsCopySafeCodec(codec ?? undefined);
 
   // Detect HEVC/H.265 video — Android ExoPlayer requires -tag:v hvc1 for HEVC in MPEG-TS HLS.
   // Without this tag ffmpeg defaults to hev1 which Media3 cannot decode.
-  const videoCodec = await getVideoStreamCodec(sourcePath).catch(() => null);
+  const videoCodec = await getVideoStreamCodec(safeSourcePath).catch(() => null);
   const isHevc = videoCodec === 'hevc' || videoCodec === 'h265';
 
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
@@ -215,7 +246,7 @@ export async function createSession(
     '-threads', '0',
     // Seek to start position if specified
     ...(startTime > 0 ? ['-ss', String(startTime)] : []),
-    '-i', sourcePath,
+    '-i', safeSourcePath,
     '-map', '0:v:0',
     '-map', `0:${audioTrackIndex}`,
     '-c:v', 'copy',
@@ -263,7 +294,7 @@ export async function createSession(
   const session: HlsSession = {
     id: sessionId,
     episodeId,
-    sourcePath,
+    sourcePath: safeSourcePath,
     audioTrackIndex,
     browserSafeAudio: canCopyAudio,
     isHevc,
@@ -341,11 +372,8 @@ export async function getSegmentPath(sessionId: string, segmentName: string): Pr
 
   session.lastAccess = Date.now();
 
-  // Sanitize segment name to prevent path traversal
-  const safeName = path.basename(segmentName);
-  if (!safeName.endsWith('.ts')) return null;
-
-  const segmentPath = path.join(session.dir, safeName);
+  const segmentPath = getSegmentFilePath(session.dir, segmentName);
+  if (!segmentPath) return null;
 
   try {
     const stats = await stat(segmentPath);
@@ -362,6 +390,7 @@ export async function getSegmentPath(sessionId: string, segmentName: string): Pr
 export async function seekSession(sessionId: string, timeSeconds: number): Promise<boolean> {
   const session = sessions.get(sessionId);
   if (!session || session.destroying) return false;
+  const logSessionId = session.id.slice(0, 8);
 
   session.lastAccess = Date.now();
 
@@ -375,7 +404,7 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
     const files = await readdir(session.dir);
     for (const file of files) {
       if (file.endsWith('.ts') || file.endsWith('.m3u8') || file.endsWith('.tmp')) {
-        await rm(path.join(session.dir, file), { force: true });
+        await rm(resolveWithinRoot(session.dir, file), { force: true });
       }
     }
   } catch {
@@ -385,7 +414,7 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
   // Restart ffmpeg from new position
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
   const segDuration = Math.max(2, Math.min(30, env.HLS_SEGMENT_DURATION));
-  const segmentPattern = path.join(session.dir, 'seg%05d.ts');
+  const segmentPattern = resolveWithinRoot(session.dir, 'seg%05d.ts');
 
   const ffmpegArgs: string[] = [
     '-v', 'warning',
@@ -417,18 +446,18 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
   ffmpegProcess.stderr?.on('data', (chunk: Buffer) => {
     const msg = chunk.toString().trim();
     if (msg && !msg.startsWith('frame=')) {
-      console.warn(`[HLS][${sessionId.slice(0, 8)}] ffmpeg: ${msg.slice(0, 200)}`);
+      console.warn(`[HLS][${logSessionId}] ffmpeg: ${msg.slice(0, 200)}`);
     }
   });
 
   ffmpegProcess.on('error', (err) => {
-    console.error(`[HLS][${sessionId.slice(0, 8)}] ffmpeg process error:`, err.message);
+    console.error(`[HLS][${logSessionId}] ffmpeg process error:`, err.message);
   });
 
   ffmpegProcess.on('close', (code) => {
     const s = sessions.get(sessionId);
     if (s && !s.destroying) {
-      console.log(`[HLS][${sessionId.slice(0, 8)}] ffmpeg (seek) exited with code ${code}`);
+      console.log(`[HLS][${logSessionId}] ffmpeg (seek) exited with code ${code}`);
     }
   });
 
@@ -439,7 +468,7 @@ export async function seekSession(sessionId: string, timeSeconds: number): Promi
   // Wait for the first new segment before returning
   await session.readyPromise;
 
-  console.log(`[HLS] Session ${sessionId.slice(0, 8)} seeked to ${timeSeconds}s`);
+  console.log(`[HLS] Session ${logSessionId} seeked to ${timeSeconds}s`);
   return true;
 }
 

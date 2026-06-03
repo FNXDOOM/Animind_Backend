@@ -1,6 +1,34 @@
 import type { Request, Response } from 'express';
 
 const ANILIST_API_URL = 'https://graphql.anilist.co';
+const MAX_GRAPHQL_QUERY_LENGTH = 10_000;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeGraphqlQuery(query: string): string | null {
+  const normalized = query.trim();
+  if (!normalized || normalized.length > MAX_GRAPHQL_QUERY_LENGTH) {
+    return null;
+  }
+
+  const withoutComments = normalized
+    .split('\n')
+    .filter(line => !line.trimStart().startsWith('#'))
+    .join('\n')
+    .trimStart();
+
+  if (/^(mutation|subscription)\b/i.test(withoutComments)) {
+    return null;
+  }
+
+  if (/\b(mutation|subscription)\b/i.test(withoutComments)) {
+    return null;
+  }
+
+  return normalized;
+}
 
 /**
  * POST /api/anilist
@@ -15,6 +43,17 @@ export async function proxyAnilist(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  const safeQuery = normalizeGraphqlQuery(query);
+  if (!safeQuery) {
+    res.status(400).json({ error: 'Only read-only AniList GraphQL queries are allowed.' });
+    return;
+  }
+
+  if (variables !== undefined && !isPlainRecord(variables)) {
+    res.status(400).json({ error: 'Invalid "variables" field.' });
+    return;
+  }
+
   try {
     const upstream = await fetch(ANILIST_API_URL, {
       method: 'POST',
@@ -23,7 +62,7 @@ export async function proxyAnilist(req: Request, res: Response): Promise<void> {
         'Accept': 'application/json',
         'User-Agent': 'AniMind/1.0 (https://fnxdoom.in)',
       },
-      body: JSON.stringify({ query, variables: variables ?? {} }),
+      body: JSON.stringify({ query: safeQuery, variables: variables ?? {} }),
     });
 
     const contentType = upstream.headers.get('content-type') ?? '';

@@ -52,7 +52,8 @@ const STREAM_RANGE_CHUNK_MB = Number.isFinite(env.STREAM_RANGE_CHUNK_MB) ? env.S
 const STREAM_RANGE_CHUNK_SIZE_BYTES = Math.max(2, Math.min(32, STREAM_RANGE_CHUNK_MB)) * 1024 * 1024;
 // For native clients (ExoPlayer/Android), allow much larger chunks for smooth long-episode playback
 const NATIVE_STREAM_RANGE_CHUNK_SIZE_BYTES = 32 * 1024 * 1024; // 32 MB
-const AUDIO_CACHE_ROOT_DIR = path.resolve(env.LOCAL_STORAGE_PATH, '.animind-audio-cache');
+const LOCAL_STORAGE_ROOT_DIR = path.resolve(env.LOCAL_STORAGE_PATH);
+const AUDIO_CACHE_ROOT_DIR = path.resolve(LOCAL_STORAGE_ROOT_DIR, '.animind-audio-cache');
 
 interface StreamTicketPayload {
   episodeId: string;
@@ -147,6 +148,38 @@ function toPosix(filePath: string): string {
   return filePath.replace(/\\/g, '/');
 }
 
+function assertPathWithinRoot(filePath: string, rootDir: string): string {
+  const root = path.resolve(rootDir);
+  const resolved = path.resolve(filePath);
+  const relative = path.relative(root, resolved);
+  if (relative && (relative.startsWith('..') || path.isAbsolute(relative))) {
+    throw new Error('Unsafe file path outside allowed storage root.');
+  }
+  return resolved;
+}
+
+function resolveWithinRoot(rootDir: string, ...segments: string[]): string {
+  return assertPathWithinRoot(path.resolve(rootDir, ...segments), rootDir);
+}
+
+function resolveLocalStoragePath(filePath: string): string {
+  return resolveWithinRoot(LOCAL_STORAGE_ROOT_DIR, filePath);
+}
+
+function getAudioCacheEpisodeDir(episodeId: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(episodeId)) {
+    throw new Error('Invalid episode id for audio cache path.');
+  }
+  return resolveWithinRoot(AUDIO_CACHE_ROOT_DIR, episodeId);
+}
+
+function resolveAudioCacheFile(episodeCacheDir: string, fileName: string): string {
+  if (!/^[A-Za-z0-9_-]+-[A-Za-z0-9_-]+-[a-f0-9]{12}\.mp4$/i.test(fileName) && fileName !== 'metadata.json') {
+    throw new Error('Invalid audio cache file name.');
+  }
+  return resolveWithinRoot(episodeCacheDir, fileName);
+}
+
 function isMatchingSubtitleSidecar(fileName: string, videoBaseName: string): boolean {
   const fileNameLower = fileName.toLowerCase();
   const baseNameLower = videoBaseName.toLowerCase();
@@ -213,7 +246,10 @@ function formatSeasonFolderName(seasonNumber: number): string {
 function getShowRootDirFromEpisodePath(filePath: string): string {
   const normalized = filePath.replace(/\\/g, '/');
   const [showFolder] = normalized.split('/');
-  return path.resolve(env.LOCAL_STORAGE_PATH, showFolder || '');
+  if (!showFolder || showFolder === '.' || showFolder === '..') {
+    throw new Error('Invalid show folder path.');
+  }
+  return resolveWithinRoot(LOCAL_STORAGE_ROOT_DIR, showFolder);
 }
 
 async function runProcess(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -267,8 +303,8 @@ async function getOrCreateAudioVariant(
   episodeId: string,
   audioTrackIndex: number
 ): Promise<string> {
-  const episodeCacheDir = path.join(AUDIO_CACHE_ROOT_DIR, episodeId);
-  const metadataPath = path.join(episodeCacheDir, 'metadata.json');
+  const episodeCacheDir = getAudioCacheEpisodeDir(episodeId);
+  const metadataPath = resolveAudioCacheFile(episodeCacheDir, 'metadata.json');
 
   const ffmpegBin = process.env.FFMPEG_PATH || 'ffmpeg';
   const codec = await getAudioStreamCodec(sourcePath, audioTrackIndex).catch(() => null);
@@ -280,7 +316,7 @@ async function getOrCreateAudioVariant(
   const variantSignature = `${sourceSignature}:${preferredMode}`;
   const variantHash = crypto.createHash('sha1').update(variantSignature).digest('hex').slice(0, 12);
   const variantFileName = `a${audioTrackIndex}-${preferredMode}-${variantHash}.mp4`;
-  const outputPath = path.join(episodeCacheDir, variantFileName);
+  const outputPath = resolveAudioCacheFile(episodeCacheDir, variantFileName);
 
   await mkdir(episodeCacheDir, { recursive: true });
 
@@ -309,7 +345,7 @@ async function getOrCreateAudioVariant(
   );
 
   if (existing?.variantPath) {
-    const existingPath = path.join(episodeCacheDir, existing.variantPath);
+    const existingPath = resolveAudioCacheFile(episodeCacheDir, existing.variantPath);
     try {
       const cached = await stat(existingPath);
       if (cached.size > 0) {
@@ -408,7 +444,8 @@ async function getOrCreateAudioVariant(
 }
 
 async function getAudioCacheMetadata(episodeId: string): Promise<AudioCacheMetadata | null> {
-  const metadataPath = path.join(AUDIO_CACHE_ROOT_DIR, episodeId, 'metadata.json');
+  const episodeCacheDir = getAudioCacheEpisodeDir(episodeId);
+  const metadataPath = resolveAudioCacheFile(episodeCacheDir, 'metadata.json');
   try {
     const raw = await readFile(metadataPath, 'utf-8');
     const parsed = JSON.parse(raw) as AudioCacheMetadata;
@@ -572,7 +609,7 @@ async function getLocalSubtitleTracks(
   episodeNumber?: number,
   seasonNumber?: number
 ): Promise<SubtitleTrackPayload[]> {
-  const fullVideoPath = path.resolve(env.LOCAL_STORAGE_PATH, filePath);
+  const fullVideoPath = resolveLocalStoragePath(filePath);
   const dir = path.dirname(fullVideoPath);
   const baseName = path.parse(fullVideoPath).name;
 
@@ -591,7 +628,8 @@ async function getLocalSubtitleTracks(
       const ext = path.extname(subtitleFile).toLowerCase();
       if (!SUBTITLE_EXTENSIONS.includes(ext)) continue;
 
-      const content = await readFile(path.join(directoryPath, subtitleFile), 'utf-8');
+      const subtitlePath = resolveWithinRoot(directoryPath, subtitleFile);
+      const content = await readFile(subtitlePath, 'utf-8');
       tracks.push({
         id: subtitleFile,
         label: subtitleFile,
@@ -663,7 +701,8 @@ async function getLocalSubtitleTracks(
     const ext = path.extname(subtitleFile).toLowerCase();
     if (!SUBTITLE_EXTENSIONS.includes(ext)) continue;
 
-    const content = await readFile(path.join(dir, subtitleFile), 'utf-8');
+    const subtitlePath = resolveWithinRoot(dir, subtitleFile);
+    const content = await readFile(subtitlePath, 'utf-8');
     tracks.push({
       id: subtitleFile,
       label: subtitleFile,
@@ -768,7 +807,7 @@ export async function streamEpisode(req: Request, res: Response) {
     }
 
     // ── Local: HTTP Range-Request streaming ──────────────────────────────────
-    let filePath = streamInfo.url;
+    let filePath = assertPathWithinRoot(streamInfo.url, LOCAL_STORAGE_ROOT_DIR);
     const shouldBuildAudioVariant = !isNativeTicket && selectedAudioTrackIndex !== null;
     if (shouldBuildAudioVariant) {
       try {
@@ -779,6 +818,8 @@ export async function streamEpisode(req: Request, res: Response) {
         return;
       }
     }
+
+    filePath = assertPathWithinRoot(filePath, LOCAL_STORAGE_ROOT_DIR);
 
     let fileSize: number;
     try {
@@ -944,7 +985,7 @@ export async function getEpisodeAudioTracks(req: Request, res: Response) {
   }
 
   try {
-    const fullVideoPath = path.resolve(env.LOCAL_STORAGE_PATH, episode.file_path);
+    const fullVideoPath = resolveLocalStoragePath(episode.file_path);
     const tracks = await getEmbeddedAudioTracks(fullVideoPath);
     const cacheMeta = await getAudioCacheMetadata(id);
     const withCache = tracks.map(track => {

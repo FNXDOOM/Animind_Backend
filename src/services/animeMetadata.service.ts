@@ -30,7 +30,25 @@ function normalizeCacheKey(title: string): string {
 }
 
 function stripHtml(text: string | null | undefined): string | null {
-  return text?.replace(/<[^>]+>/g, '') ?? null;
+  if (!text) return null;
+
+  let output = '';
+  let insideTag = false;
+  for (const char of text) {
+    if (char === '<') {
+      insideTag = true;
+      continue;
+    }
+    if (char === '>') {
+      insideTag = false;
+      continue;
+    }
+    if (!insideTag) {
+      output += char;
+    }
+  }
+
+  return output;
 }
 
 async function fetchAnimeMetaUncached(title: string): Promise<AnimeMetadata | null> {

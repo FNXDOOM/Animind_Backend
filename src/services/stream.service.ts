@@ -8,6 +8,7 @@
 
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import path from 'path';
 import { env } from '../config/env.js';
 
 let s3: S3Client | null = null;
@@ -52,6 +53,7 @@ export async function getStreamInfo(
   }
 
   // Local mode — caller (controller) will pipe the file
-  const fullPath = `${env.LOCAL_STORAGE_PATH}/${filePath}`;
+  const storageRoot = path.resolve(env.LOCAL_STORAGE_PATH);
+  const fullPath = path.resolve(storageRoot, filePath);
   return { type: 'proxy', url: fullPath };
 }
