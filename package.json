@@ -37,7 +37,7 @@
     "@types/supertest": "^6.0.3",
     "@types/uuid": "^10.0.0",
     "supertest": "^7.1.4",
-    "tsx": "^4.15.6",
+    "tsx": "^4.23.0",
     "typescript": "^5.4.5",
     "vitest": "^4.1.8"
   }
